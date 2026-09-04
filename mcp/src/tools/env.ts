@@ -25,6 +25,7 @@ import {
   getCloudBaseManager,
   listAvailableEnvCandidates,
   logCloudBaseResult,
+  probeApiKeyCamCapability,
   resetCloudBaseManagerCache,
   resolveEnvCandidateByEnvId,
   type EnvCandidate,
@@ -34,9 +35,11 @@ import { debug } from "../utils/logger.js";
 import {
   getSite,
   normalizeSite,
+  resolveApiKeyExchangeRegion,
   resolveSiteAndRegion,
   TCB_QUERY_REGIONS,
 } from "../utils/site-map.js";
+import { readProjectEnvId } from "../utils/project-config.js";
 import {
   buildAuthNextStep,
   buildJsonToolResult,
@@ -686,17 +689,27 @@ function isApiKeyCredentialMode(): boolean {
   return Boolean(getCloudBaseApiKeyFromEnv() && process.env.CLOUDBASE_ENV_ID);
 }
 
-function getCredentialScope(): CredentialScope {
+function getCredentialScope(cloudBaseOptions?: {
+  credentialScope?: string;
+}): CredentialScope {
+  // 只认宿主的显式声明 credentialScope: 'env'（如 tcb-bff hosted OAuth 签发的
+  // 环境级 federated STS）。账号级 DescribeEnvs（不带 EnvId）会被后端拒绝（invalid token）。
+  // 注意：不能用 token 字段的有无推断范围——sessionToken 本身不携带权限范围语义。
+  if (cloudBaseOptions?.credentialScope === "env") return "single_env";
   return isApiKeyCredentialMode() ? "single_env" : "account";
 }
 
-function buildCredentialBoundaryPayload(cloudBaseOptions?: { region?: string; envId?: string }) {
-  const credentialScope = getCredentialScope();
+function buildCredentialBoundaryPayload(cloudBaseOptions?: {
+  region?: string;
+  envId?: string;
+  credentialScope?: string;
+}) {
+  const credentialScope = getCredentialScope(cloudBaseOptions);
   const currentRegion = resolveSiteAndRegion(cloudBaseOptions ?? {}).region;
   const pinnedEnvId = process.env.CLOUDBASE_ENV_ID || cloudBaseOptions?.envId || null;
   const scopeNote =
     credentialScope === "single_env"
-      ? `当前为环境级 API Key 登录（单环境权限）。只能访问已绑定的 envId${pinnedEnvId ? ` ${pinnedEnvId}` : ""}，看不到账号下其他环境或其他地域。这是凭据权限边界，不是环境不存在。`
+      ? `当前为环境级凭证登录（单环境权限，API Key 或托管授权 token）。只能访问已绑定的 envId${pinnedEnvId ? ` ${pinnedEnvId}` : ""}，看不到账号下其他环境或其他地域。这是凭据权限边界，不是环境不存在。queryEnv(action="list") 会自动降级为仅返回绑定环境的信息。`
       : `当前为账号级登录。DescribeEnvs 按地域查询；未传 region 时使用当前地域 ${currentRegion}。其他地域请用 queryEnv(action="list", region="ap-singapore")，或 CLI: tcb env list -r ap-singapore。`;
 
   return {
@@ -882,6 +895,29 @@ function buildAuthEnvSetupPayload(preparation: AuthEnvPreparationResult) {
   };
 }
 
+// API Key 登录态 CAM 能力受限时的用户提示（实测：部分 API Key 换出的 STS 不带 CAM 策略）
+const API_KEY_CAM_LIMITATION_WARNING =
+  "\n\n⚠️ 注意：该 API Key 换取的临时凭据无法调用管理面 API（CAM 鉴权不通过），管理类工具（queryEnv、queryAppAuth、manageAppAuth 等）将不可用。如需完整能力，请改用长期密钥 TENCENTCLOUD_SECRETID / TENCENTCLOUD_SECRETKEY 认证。";
+
+/**
+ * API Key 登录态 AUTH_READY 出口统一追加 CAM 能力探测警告。
+ * 仅在探测明确返回 limited（CAM 拒绝）时追加；capable/unknown 静默通过。
+ */
+async function appendApiKeyCamWarningIfNeeded(
+  loginState: any,
+  message: string,
+): Promise<string> {
+  try {
+    const probe = await probeApiKeyCamCapability(loginState);
+    return probe === "limited" ? message + API_KEY_CAM_LIMITATION_WARNING : message;
+  } catch (e) {
+    debug("appendApiKeyCamWarningIfNeeded: probe threw", {
+      error: e instanceof Error ? e.message : String(e),
+    });
+    return message;
+  }
+}
+
 async function prepareAuthEnvironment(params: {
   server: ExtendedMcpServer;
   cloudBaseOptions: any;
@@ -891,6 +927,9 @@ async function prepareAuthEnvironment(params: {
   const currentEnvId =
     getCachedEnvId() ||
     process.env.CLOUDBASE_ENV_ID ||
+    // 项目级绑定（.cloudbase/project.json 的 envId，回退 cloudbaserc.json）优先于账号级登录态：
+    // 登录态是全局的，可能指向别的仓库绑定的环境。
+    readProjectEnvId() ||
     (typeof loginState?.envId === "string" && loginState.envId.length > 0
       ? loginState.envId
       : null);
@@ -1538,10 +1577,11 @@ function buildEnvQueryErrorMessage(error: unknown, action: string): string {
   const suggestions: string[] = [];
 
   if (hasInvalidParameterError) {
-    suggestions.push("参数错误：可能是认证信息无效或已过期，请尝试以下步骤：");
-    suggestions.push("1. 先调用 auth(action=\"status\") 检查当前登录状态");
-    suggestions.push("2. 如果未登录，调用 auth(action=\"start_auth\", authMode=\"device\") 完成登录");
-    suggestions.push("3. 登录完成后再次调用 queryEnv(action=\"list\")");
+    suggestions.push("参数错误：请求未通过服务端的参数校验，请检查本次调用的入参：");
+    suggestions.push("1. 各参数取值是否在允许范围内（枚举值、时间粒度、数量上限等）");
+    suggestions.push("2. 各参数格式是否正确，需要成对传入的参数是否齐全");
+    suggestions.push("3. 必填参数是否都已提供，参数名与类型是否正确");
+    suggestions.push(`4. 修正参数后重新调用 queryEnv(action=\"${action}\")`);
   }
 
   if (hasAuthError) {
@@ -2216,7 +2256,10 @@ export function registerEnvTools(server: ExtendedMcpServer) {
                 return buildJsonToolResult({
                   ok: true,
                   code: "AUTH_READY",
-                  message: "当前使用 API Key 认证模式，已自动完成登录，无需手动授权。",
+                  message: await appendApiKeyCamWarningIfNeeded(
+                    existingLoginState,
+                    "当前使用 API Key 认证模式，已自动完成登录，无需手动授权。",
+                  ),
                   auth_mode: "api_key",
                   envId: process.env.CLOUDBASE_ENV_ID,
                 });
@@ -2227,16 +2270,22 @@ export function registerEnvTools(server: ExtendedMcpServer) {
             }
 
             // API Key exchange failed: return diagnostic details
+            const exchangeRegion = resolveApiKeyExchangeRegion();
             let diagMessage = "当前配置了 API Key 认证模式，但换取临时密钥失败。";
-            const endpoint = process.env.CLOUDBASE_API_ENDPOINT || `https://${process.env.CLOUDBASE_ENV_ID}.ap-shanghai.tcb-api.tencentcloudapi.com`;
+            const endpoint =
+              process.env.CLOUDBASE_API_ENDPOINT ||
+              `https://${process.env.CLOUDBASE_ENV_ID}.${exchangeRegion ?? "ap-shanghai"}.tcb-api.tencentcloudapi.com`;
             diagMessage += `\n\n诊断信息：`;
             diagMessage += `\n- CLOUDBASE_ENV_ID: ${process.env.CLOUDBASE_ENV_ID}`;
             diagMessage += `\n- CLOUDBASE_API_KEY: ${apiKeyFromEnv.slice(0, 20)}...（已截断）`;
+            diagMessage += `\n- TCB_SITE: ${process.env.TCB_SITE || "(未设置)"}`;
+            diagMessage += `\n- 换取网关地域: ${exchangeRegion ?? "ap-shanghai（国内站默认，多地域环境均经其路由）"}`;
             diagMessage += `\n- Endpoint: ${endpoint}`;
             diagMessage += `\n\n可能原因：`;
             diagMessage += `\n1. API Key 已过期或被删除`;
             diagMessage += `\n2. Endpoint 不可达（网络/DNS 问题）`;
             diagMessage += `\n3. CLOUDBASE_ENV_ID 与 API Key 所属环境不匹配`;
+            diagMessage += `\n4. API Key 与站点不匹配：国际站环境的 Key 需配置 TCB_SITE=intl（走 ap-singapore 网关）；国内站环境（含 ap-guangzhou/ap-singapore 地域）不要配置 intl`;
             diagMessage += `\n\n建议：检查 MCP 配置中的 CLOUDBASE_API_KEY（或兼容的 CLOUDBASE_APIKEY）和 CLOUDBASE_ENV_ID 环境变量是否正确。`;
 
             return buildJsonToolResult({
@@ -2467,7 +2516,10 @@ export function registerEnvTools(server: ExtendedMcpServer) {
               return buildJsonToolResult({
                 ok: true,
                 code: "AUTH_READY",
-                message: "API Key 认证成功，已获取临时密钥。",
+                message: await appendApiKeyCamWarningIfNeeded(
+                  loginState,
+                  "API Key 认证成功，已获取临时密钥。",
+                ),
                 auth_mode: "api_key",
                 ...buildAuthEnvSetupPayload(envPreparation),
                 next_step: envPreparation.nextStep,
@@ -2482,10 +2534,12 @@ export function registerEnvTools(server: ExtendedMcpServer) {
             diagMessage += `\n\n诊断信息：`;
             diagMessage += `\n- CLOUDBASE_ENV_ID: ${toolApiKeyEnvId}`;
             diagMessage += `\n- CLOUDBASE_API_KEY: ${toolApiKey.slice(0, 20)}...（已截断）`;
+            diagMessage += `\n- TCB_SITE: ${process.env.TCB_SITE || "(未设置)"}`;
             diagMessage += `\n\n可能原因：`;
             diagMessage += `\n1. API Key 已过期或被删除`;
             diagMessage += `\n2. CLOUDBASE_ENV_ID 与 API Key 所属环境不匹配`;
-            diagMessage += `\n3. 网络连接问题`;
+            diagMessage += `\n3. API Key 与站点不匹配：国际站环境的 Key 需配置 TCB_SITE=intl（走 ap-singapore 网关）；国内站环境（含 ap-guangzhou/ap-singapore 地域）不要配置 intl`;
+            diagMessage += `\n4. 网络连接问题`;
             diagMessage += `\n\n建议：请检查 API Key 和环境 ID 是否正确。`;
 
             return buildJsonToolResult({
@@ -2767,10 +2821,22 @@ export function registerEnvTools(server: ExtendedMcpServer) {
               // API Key / env-var pin: skip DescribeEnvs (STS often cannot list).
               // Account-level sessions that only pinned CLOUDBASE_ENV_ID via set_env
               // can still pass region/alias/envId to list other environments.
-              const envIdFromEnv = !cloudBaseOptions?.requestFn && process.env.CLOUDBASE_ENV_ID;
+              // Hosted OAuth: 宿主（tcb-bff）显式声明 credentialScope: 'env'，签发的
+              // 环境级 federated STS 调账号级 DescribeEnvs 会被拒（"invalid token"），
+              // 同样 pin 到绑定 envId 降级为 describeEnvInfo。
+              const isEnvScopedCredential =
+                cloudBaseOptions?.credentialScope === "env" &&
+                typeof cloudBaseOptions?.envId === "string" &&
+                cloudBaseOptions.envId.length > 0;
+              const envIdFromEnv =
+                !cloudBaseOptions?.requestFn &&
+                (process.env.CLOUDBASE_ENV_ID ||
+                  (isEnvScopedCredential ? cloudBaseOptions.envId : undefined));
               const shouldPinToEnvVar = Boolean(
                 envIdFromEnv &&
-                (isApiKeyCredentialMode() || (!region && !alias && !envId)),
+                (isApiKeyCredentialMode() ||
+                  isEnvScopedCredential ||
+                  (!region && !alias && !envId)),
               );
               if (shouldPinToEnvVar && envIdFromEnv) {
                 try {
@@ -2790,6 +2856,13 @@ export function registerEnvTools(server: ExtendedMcpServer) {
                 } catch (envInfoError) {
                   debug("DescribeEnvInfo 失败，返回基础环境信息:", envInfoError instanceof Error ? envInfoError : new Error(String(envInfoError)));
                   result = { EnvList: [{ EnvId: envIdFromEnv }] };
+                }
+                // 给调用方 AI 说明降级原因，避免误判为"账号只有一个环境"
+                if (isEnvScopedCredential) {
+                  result = {
+                    ...result,
+                    scope_note: `当前凭证为环境级（托管授权凭证绑定 ${envIdFromEnv}），账号级环境列表接口无权限，已降级为仅返回绑定环境的信息。如需查看账号下全部环境，请用有账号级权限的凭证登录。`,
+                  };
                 }
               } else {
                 // Use commonService to call DescribeEnvs with filter parameters
@@ -2908,11 +2981,11 @@ export function registerEnvTools(server: ExtendedMcpServer) {
                     "此查询不会自动知道你当前浏览器实际使用的自定义域名或本地端口。即使已经存在一些 localhost/127.0.0.1 条目，也不能据此认定浏览器上传已就绪。若浏览器 Web 应用需要直接上传文件到 CloudBase，请先确认并添加当前访问地址对应的 host:port，再依赖 app.uploadFile()。",
                 },
                 next_step_template: {
-                  tool: "envDomainManagement",
-                  action: "create",
+                  tool: "manageEnv",
+                  action: "addSecurityDomain",
                   domains: ["<actual-browser-host>:<actual-browser-port>"],
                   note:
-                    "请把占位符替换为当前浏览器实际访问 origin 对应的 host:port，再执行添加。",
+                    "请把占位符替换为当前浏览器实际访问 origin 对应的 host:port，再执行添加。manageEnv(action=addSecurityDomain) 即原 envDomainManagement(create)。",
                 },
               };
             }
@@ -3155,8 +3228,22 @@ export function registerEnvTools(server: ExtendedMcpServer) {
     },
   };
   server.registerTool?.("queryEnv", queryEnvToolSchema, queryEnvHandler);
-  // 向后兼容：envQuery 作为 queryEnv 的别名注册
-  server.registerTool?.("envQuery", queryEnvToolSchema, queryEnvHandler);
+  // 向后兼容：envQuery 作为 queryEnv 的别名注册。
+  // DEPRECATED：词序与 query*/manage* 规范不一致（灯塔数据显示与 queryEnv 在 2.32.5 并行被调用），
+  // 本版本仅标记废弃，计划下个版本移除此别名注册。
+  server.registerTool?.(
+    "envQuery",
+    {
+      ...queryEnvToolSchema,
+      description:
+        (queryEnvToolSchema.description ?? "") +
+        "\n\n⚠️ DEPRECATED：此工具名已废弃，是 queryEnv 的旧词序别名，入参与 action 完全一致。请直接调用 queryEnv；本别名将在下个版本移除。",
+      annotations: {
+        ...queryEnvToolSchema.annotations,
+      },
+    },
+    queryEnvHandler,
+  );
 
   // envDomainManagement - 环境域名管理（合并 createEnvDomain + deleteEnvDomain）
   // 微信 IDE 场景不需要域名管理
@@ -3164,9 +3251,9 @@ export function registerEnvTools(server: ExtendedMcpServer) {
   server.registerTool?.(
     "envDomainManagement",
     {
-      title: "CloudBase 环境域名管理（安全域名 / CORS 白名单）",
+      title: "CloudBase 环境安全域名管理（浏览器 CORS 白名单）【已废弃】",
       description:
-        "管理 CloudBase 环境的安全域名（安全域名 / CORS 白名单），支持添加和删除操作。（原工具名：createEnvDomain/deleteEnvDomain，为兼容旧AI规则可继续使用这些名称）当浏览器 Web 应用需要从本地 Vite / dev server 直接访问 CloudBase 资源时，应先用 queryEnv(action=domains) 检查当前实际浏览器 origin 对应的 host:port 是否已在白名单中，再按该实际值添加。新增或删除后请每约 10 秒轮询 queryEnv(action=domains) 确认状态收敛，勿一次 sleep 满 10 分钟；多数环境数分钟内可收敛。⚠️ 重要：此工具仅用于 CORS/请求来源验证，不涉及 SSL 证书。自定义域名公网 HTTPS：先 queryGateway(listCustomDomains)；已有域名则 manageGateway(createRoute) 显式传 domain（无需证书）；仅首次绑定新域名才用 bindCustomDomain（需 certificateId）。",
+        "⚠️ DEPRECATED：此工具已废弃并收编进 manageEnv，请改用 manageEnv(action=\"addSecurityDomain\") / manageEnv(action=\"removeSecurityDomain\")（入参 domains 完全一致）。本别名将在下个版本移除。\n\n管理【环境安全域名】＝浏览器跨域（CORS）白名单：控制允许哪些网页 origin（host:port）从浏览器直接调用本环境的 CloudBase 资源。只做 CORS 来源验证，不提供访问域名，不涉及 HTTPS 证书。⚠️ 与【网关自定义域名】是两套完全独立的配置，互不相干：如需给自己的域名绑定 HTTPS 访问入口（云托管 / 网关服务），那属于 manageGateway 的职责——先 queryGateway(listCustomDomains)；已有域名则 manageGateway(createRoute) 显式传 domain（无需证书）；仅首次绑定新域名才用 bindCustomDomain（需 certificateId）。不要用本工具做这件事。\n\n操作指引：（原工具名 createEnvDomain/deleteEnvDomain，为兼容旧 AI 规则可继续使用这些名称）当浏览器 Web 应用需要从本地 Vite / dev server 直接访问 CloudBase 资源时，先用 queryEnv(action=domains) 检查当前实际浏览器 origin 对应的 host:port 是否已在白名单中，再按该实际值添加。新增或删除后请每约 10 秒轮询 queryEnv(action=domains) 确认状态收敛，勿一次 sleep 满 10 分钟；多数环境数分钟内可收敛。",
       inputSchema: {
         action: z
           .enum(["create", "delete"])
@@ -3236,14 +3323,20 @@ export function registerEnvTools(server: ExtendedMcpServer) {
   server.registerTool?.(
     "manageEnv",
     {
-      title: "CloudBase 环境管理（创建/变配/续费）",
+      title: "CloudBase 环境管理（创建/变配/续费/安全域名）",
       description:
-        "管理 CloudBase 环境，支持：listPackages=查询可选套餐列表，create=创建新环境（需确认），modifyPlan=变更套餐（升降配，需确认），renew=续费环境（需确认）。\n\n⚠️ 所有涉及费用的操作（create/modifyPlan/renew），执行前必须展示配置摘要并等待用户通过 confirm=\"yes\" 确认。",
+        "管理 CloudBase 环境，支持：listPackages=查询可选套餐列表，create=创建新环境（需确认），modifyPlan=变更套餐（升降配，需确认），renew=续费环境（需确认），addSecurityDomain=添加环境安全域名（浏览器 CORS 白名单，不计费、无需确认），removeSecurityDomain=删除环境安全域名（不计费、无需确认）。\n\n⚠️ 涉及费用的操作（create/modifyPlan/renew），执行前必须展示配置摘要并等待用户通过 confirm=\"yes\" 确认；安全域名操作（addSecurityDomain/removeSecurityDomain）不计费，无需 confirm。\n\nℹ️ 安全域名＝浏览器跨域（CORS）白名单，控制允许哪些网页 origin（host:port）从浏览器直接调用本环境的 CloudBase 资源，不提供访问域名、不涉及 HTTPS 证书。给自己的域名绑定 HTTPS 访问入口（云托管/网关服务）属于 manageGateway（listCustomDomains/bindCustomDomain）的职责，与本工具无关。",
       inputSchema: {
         action: z
-          .enum(["listPackages", "create", "modifyPlan", "renew"])
+          .enum(["listPackages", "create", "modifyPlan", "renew", "addSecurityDomain", "removeSecurityDomain"])
           .describe(
-            "操作类型：listPackages=查询可选套餐，create=创建环境，modifyPlan=变更套餐，renew=续费",
+            "操作类型：listPackages=查询可选套餐，create=创建环境，modifyPlan=变更套餐，renew=续费，addSecurityDomain=添加安全域名（CORS 白名单条目），removeSecurityDomain=删除安全域名",
+          ),
+        domains: z
+          .array(z.string())
+          .optional()
+          .describe(
+            "安全域名数组（格式：host:port，例如 localhost:5173 或 127.0.0.1:4173）。仅 action=addSecurityDomain/removeSecurityDomain 时有效且必填。注意：这是 CORS 白名单条目，不是自定义域名，不需要证书。添加前应先用 queryEnv(action=domains) 检查浏览器实际 origin 是否已在白名单中。",
           ),
         alias: z
           .string()
@@ -3291,6 +3384,7 @@ export function registerEnvTools(server: ExtendedMcpServer) {
       duration?: number;
       envId?: string;
       confirm?: string;
+      domains?: string[];
     }) => {
       const action = rawArgs.action ?? "";
       const alias = normalizeOptionalToolString(rawArgs.alias);
@@ -3299,6 +3393,9 @@ export function registerEnvTools(server: ExtendedMcpServer) {
       const duration = rawArgs.duration ?? 1;
       const envId = normalizeOptionalToolString(rawArgs.envId);
       const confirmed = rawArgs.confirm === "yes";
+      const domains = (rawArgs.domains ?? [])
+        .map((d) => (typeof d === "string" ? d.trim() : ""))
+        .filter(Boolean);
 
       try {
         const cloudbase = await getManager({ requireEnvId: false });
@@ -3728,11 +3825,50 @@ export function registerEnvTools(server: ExtendedMcpServer) {
             });
           }
 
+          case "addSecurityDomain":
+          case "removeSecurityDomain": {
+            // 安全域名（浏览器 CORS 白名单）增删。原 envDomainManagement(create/delete) 的能力收编：
+            // 不计费、无需 confirm；微信 IDE 场景不提供域名管理（与原工具的注册 guard 保持一致）。
+            if (server.ide === "wxide") {
+              return buildJsonToolResult({
+                ok: false,
+                code: "TOOL_UNAVAILABLE_IN_WXIDE",
+                message:
+                  "微信开发者工具场景不提供环境安全域名管理。如需配置浏览器 CORS 白名单，请使用其他接入方式（CloudBase MCP / 控制台）。",
+              });
+            }
+            if (!domains.length) {
+              return buildJsonToolResult({
+                ok: false,
+                code: "DOMAINS_REQUIRED",
+                message: `action=${action} 时 domains 为必填参数（host:port 数组，例如 ["localhost:5173"]）。添加前建议先用 queryEnv(action="domains") 检查浏览器实际 origin 是否已在白名单中。`,
+                next_step: {
+                  tool: "queryEnv",
+                  action: "domains",
+                },
+              });
+            }
+            // 安全域名是环境级操作，复用与原 envDomainManagement 相同的管理器获取方式（要求环境上下文）。
+            const domainManager = await getManager();
+            const domainResult =
+              action === "addSecurityDomain"
+                ? await domainManager.env.createEnvDomain(domains)
+                : await domainManager.env.deleteEnvDomain(domains);
+            logCloudBaseResult(server.logger, domainResult);
+            return buildJsonToolResult(
+              buildEnvDomainManagementResult({
+                action: action === "addSecurityDomain" ? "create" : "delete",
+                domains,
+                result: domainResult,
+              }),
+            );
+          }
+
           default:
             return buildJsonToolResult({
               ok: false,
               code: "INVALID_ACTION",
-              message: `不支持的操作: ${action}。支持的操作: listPackages, create, destroy, modifyPlan, renew。`,
+              message: `不支持的操作: ${action}。支持的操作: listPackages, create, modifyPlan, renew, addSecurityDomain, removeSecurityDomain。`,
             });
         }
       } catch (error) {

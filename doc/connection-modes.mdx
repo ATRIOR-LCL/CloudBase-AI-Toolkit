@@ -45,6 +45,8 @@ CloudBase MCP 支持两种连接方式：**本地模式**（MCP 服务在本机�
 | `TCB_AUTH_OAUTH_ENDPOINT` | 自定义 device-code 登录 endpoint（可选，推荐作为主要覆盖项） | 不设则使用默认登录 endpoint |
 | `TCB_AUTH_CLIENT_ID` | 自定义 device-code 登录 `client_id`（高级可选） | 不设则使用默认 `client_id` |
 | `TCB_AUTH_OAUTH_CUSTOM` | 自定义 endpoint 返回格式开关（高级可选） | 未配置 endpoint 时默认 `false`；配置 endpoint 后默认 `true` |
+| `TCB_TCR_USERNAME` | 个人版 TCR 推送用户名，即腾讯云账号 UIN（可选） | 仅 HTTP 云函数个人版镜像构建（`imageType=personal` 的 `local` / `cloud`）需要；与 cloudbaserc 的 `{{env.TCB_TCR_USERNAME}}` 同名，CLI 与 MCP 共用一套变量 |
+| `TCB_TCR_PASSWORD` | 个人版 TCR 固定密码（可选） | 同上；配置后无需在工具参数中传递凭证，避免密码进入 AI 上下文。[获取个人版镜像仓库密码](https://console.cloud.tencent.com/tcr/token) |
 | `INTEGRATION_IDE` | 当前 IDE 标识（如 `Cursor`、`CodeBuddy`）（可选） | 用于日志与能力适配 |
 | `CLOUDBASE_MCP_PLUGINS_ENABLED` | 启用的插件列表，逗号分隔（可选） | 不设则使用默认插件集 |
 | `CLOUDBASE_MCP_PLUGINS_DISABLED` | 禁用的插件列表，逗号分隔（可选） | 与 URL 参数 `disable_plugins` 效果类似 |
@@ -132,6 +134,7 @@ CloudBase 有**国内站**（`domestic`，cloud.tencent.com）与**国际站**�
 显式 cloudBaseOptions.site/region
   > 环境变量 TCB_SITE / TCB_REGION
   > 项目级配置 .cloudbase/project.json
+  > cloudbaserc.json（按字段回退，site 为 MCP 扩展字段）
   > 全局默认：domestic + ap-shanghai
 ```
 
@@ -187,6 +190,26 @@ CloudBase 有**国内站**（`domestic`，cloud.tencent.com）与**国际站**�
   "envId": "your-env-id"
 }
 ```
+
+其中 `envId` 会作为该项目的默认环境，解析优先级：
+
+```
+显式 cloudBaseOptions.envId
+  > 环境变量 CLOUDBASE_ENV_ID
+  > 当前进程内已绑定的环境（auth(action="set_env") 结果）
+  > 项目级配置 .cloudbase/project.json 的 envId
+  > cloudbaserc.json 的 envId（按字段回退）
+  > 账号登录态里的环境
+  > 返回 ENV_REQUIRED，引导调用 auth(action="set_env")
+```
+
+`cloudbaserc.json` 回退源说明（面向已有 CLI 项目，无需重复维护绑定配置）：
+
+- **按字段回退**：project.json 与 cloudbaserc.json 各字段独立互补（如 project.json 只写 site、cloudbaserc.json 只写 envId 时两边同时生效），同一字段以 project.json 优先
+- **envId / region 支持字面量与 `{{env.KEY}}` 模板**：模板从项目根 `.env` / `.env.local` 解析（与 CLI 同源）；`{{private.X}}` 及解析失败的模板会被跳过，继续走下一级，不会报错
+- **MCP 不写 cloudbaserc.json**：它是 CLI 维护的人工部署配置（CLI 部署后还会自动回写）；机器管理的绑定持久化走 `.cloudbase/project.json`
+
+因为该文件在仓库内且随仓库提交，所以新起的 MCP 进程、以及同一仓库的每个 Git worktree 都会自动命中同一环境，无需为每个 worktree 重新 `set_env`；不同仓库各读自己的文件，绑定不会互相串。
 
 ### 多站点凭证并存
 
