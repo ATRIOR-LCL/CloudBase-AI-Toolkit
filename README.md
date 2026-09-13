@@ -29,7 +29,7 @@ The CloudBase integration layer for AI coding tools: Plugin installs the stack, 
 - i18n / IDE: full tool-copy localization with an instance-level `lang`, plus `auth` `site` / `region` params so international-site login and region routing resolve correctly
 - Cloud API: `callCloudApi` service allowlist widened to 57 with built-in version mapping (multi-version services such as `tke` / `mongodb` / `vod` require an explicit `version`)
 - Deploy / Env: new `appBuild` tool with hosting build neutralization; `queryEnv` reports the region actually applied and `domains` honors a passed envId
-- Skills / Docs: skill fallback reads now point at the official distribution repo with a references address list; SDK-first database decision gate for cloudrun; site doc links moved to the current Markdown addresses
+- Skills / Docs: skill fallback reads now point at the official distribution repo with a references address list; SDK-first database decision gate for cloudrun; site doc links moved to the current Markdown addresses; post-deployment share offered after delivery in the expert packs and the deploy skills (opt-in, redacted, at most once)
 
 **v2.33.x** (2026-09)
 
