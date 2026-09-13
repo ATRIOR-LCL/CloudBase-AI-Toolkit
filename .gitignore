@@ -57,3 +57,7 @@ mcp/.tmp-*/
 mcp/*.tgz
 **/vitest.config.js.timestamp-*.mjs
 tests/fixtures/readme-test/
+
+# 发布产物目录的带时间戳变体（固定名 `.plugin-repo-output/` 见上；
+# `.skills-repo-output*` 已在文件开头覆盖其全部变体）
+.plugin-repo-output-*
