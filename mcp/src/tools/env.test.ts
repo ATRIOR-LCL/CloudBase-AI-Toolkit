@@ -8,6 +8,7 @@ import {
   formatEnvMetricTime,
   isUsableNoSqlDatabaseEntry,
   registerEnvTools,
+  resolveCreateEnvResources,
   resolveEnvMetricName,
   resolveEnvMetricPeriod,
   resolveEnvMetricResourceId,
@@ -16,6 +17,8 @@ import {
   resolveEnvUsageModules,
   summarizeEnvMetricCurve,
 } from "./env.js";
+import { t, type MessageKey } from "../i18n/index.js";
+import { resolveSiteAndRegion } from "../utils/site-map.js";
 import type { ExtendedMcpServer } from "../server.js";
 
 const {
@@ -81,9 +84,6 @@ const {
     if (options.oauthCustom && !options.oauthEndpoint) {
       return "oauthCustom=true 时必须同时提供 oauthEndpoint。";
     }
-    if (options.oauthEndpoint && !options.oauthCustom) {
-      return "配置自定义 oauthEndpoint 时必须启用 oauthCustom=true。";
-    }
     return null;
   }),
   mockSupervisorLoginByWebAuth: vi.fn(),
@@ -133,24 +133,28 @@ vi.mock("@cloudbase/toolbox", () => ({
   },
 }));
 
-vi.mock("../auth.js", () => ({
-  buildAuthConfigSummary: mockBuildAuthConfigSummary,
-  buildDeviceAuthChallengePayload: mockBuildDeviceAuthChallengePayload,
-  buildVerificationUriComplete: mockBuildVerificationUriComplete,
-  ensureLogin: mockEnsureLogin,
-  ensureSlottedCredential: mockEnsureSlottedCredential,
-  listUsableCredentialSites: mockListUsableCredentialSites,
-  getAuthConfigValidationError: mockGetAuthConfigValidationError,
-  getCloudBaseApiKeyFromEnv: () =>
-    process.env.CLOUDBASE_API_KEY || process.env.CLOUDBASE_APIKEY || undefined,
-  peekLoginState: mockPeekLoginState,
-  getAuthProgressState: mockGetAuthProgressState,
-  logout: mockLogout,
-  rejectAuthProgressState: vi.fn(),
-  resolveAuthOptions: mockResolveAuthOptions,
-  resolveAuthProgressState: vi.fn(),
-  setPendingAuthProgressState: vi.fn(),
-}));
+vi.mock("../auth.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../auth.js")>();
+  return {
+    ...actual,
+    buildAuthConfigSummary: mockBuildAuthConfigSummary,
+    buildDeviceAuthChallengePayload: mockBuildDeviceAuthChallengePayload,
+    buildVerificationUriComplete: mockBuildVerificationUriComplete,
+    ensureLogin: mockEnsureLogin,
+    ensureSlottedCredential: mockEnsureSlottedCredential,
+    listUsableCredentialSites: mockListUsableCredentialSites,
+    getAuthConfigValidationError: mockGetAuthConfigValidationError,
+    getCloudBaseApiKeyFromEnv: () =>
+      process.env.CLOUDBASE_API_KEY || process.env.CLOUDBASE_APIKEY || undefined,
+    peekLoginState: mockPeekLoginState,
+    getAuthProgressState: mockGetAuthProgressState,
+    logout: mockLogout,
+    rejectAuthProgressState: vi.fn(),
+    resolveAuthOptions: mockResolveAuthOptions,
+    resolveAuthProgressState: vi.fn(),
+    setPendingAuthProgressState: vi.fn(),
+  };
+});
 
 vi.mock("../cloudbase-manager.js", () => ({
   envManager: {
@@ -174,7 +178,11 @@ vi.mock("./env-setup.js", () => ({
   checkAndCreateFreeEnv: mockCheckAndCreateFreeEnv,
 }));
 
-function createMockServer(ide = "TestIDE", authOptions?: any) {
+function createMockServer(
+  ide = "TestIDE",
+  authOptions?: any,
+  cloudBaseOptions?: Record<string, unknown>,
+) {
   const tools: Record<
     string,
     {
@@ -184,7 +192,10 @@ function createMockServer(ide = "TestIDE", authOptions?: any) {
   > = {};
 
   const server: ExtendedMcpServer = {
-    cloudBaseOptions: { envId: "env-test", region: "ap-guangzhou" },
+    cloudBaseOptions: cloudBaseOptions ?? {
+      envId: "env-test",
+      region: "ap-guangzhou",
+    },
     authOptions,
     ide,
     server: {
@@ -210,6 +221,7 @@ describe("env tools - auth", () => {
   let tools: ReturnType<typeof createMockServer>["tools"];
   const originalCloudbaseEnvId = process.env.CLOUDBASE_ENV_ID;
   const originalTcbRegion = process.env.TCB_REGION;
+  const originalTcbSite = process.env.TCB_SITE;
   const originalApiKey = process.env.CLOUDBASE_API_KEY;
 
   beforeEach(() => {
@@ -267,6 +279,11 @@ describe("env tools - auth", () => {
       delete process.env.TCB_REGION;
     } else {
       process.env.TCB_REGION = originalTcbRegion;
+    }
+    if (originalTcbSite === undefined) {
+      delete process.env.TCB_SITE;
+    } else {
+      process.env.TCB_SITE = originalTcbSite;
     }
     if (originalApiKey === undefined) {
       delete process.env.CLOUDBASE_API_KEY;
@@ -691,16 +708,121 @@ describe("env tools - auth", () => {
     expect(payload.message).toContain("oauthCustom=true");
   });
 
-  it("auth(action=start_auth) should reject oauthEndpoint when oauthCustom is explicitly false", async () => {
+  it("auth(action=start_auth) should allow standard-format endpoint with explicit oauthCustom=false", async () => {
+    mockPeekLoginState.mockResolvedValue(null);
+    mockSupervisorLoginByWebAuth.mockImplementation(
+      async ({ onDeviceCode }: { onDeviceCode: (info: any) => void }) => {
+        onDeviceCode({
+          user_code: "WDJB-MJHT",
+          verification_uri: "https://example.com/device",
+          device_code: "device-code",
+          expires_in: 600,
+        });
+        return new Promise(() => {});
+      },
+    );
+
     const result = await tools.auth.handler({
       action: "start_auth",
-      oauthEndpoint: "https://custom.example.com/oauth",
+      oauthEndpoint: "https://tcb-api.tencentcloud.com/qcloud-tcb/v1/oauth",
       oauthCustom: false,
     });
     const payload = JSON.parse(result.content[0].text);
 
+    expect(payload).toHaveProperty("code", "AUTH_PENDING");
+    const callArgs = mockSupervisorLoginByWebAuth.mock.calls.at(-1)![0];
+    expect(callArgs.getOAuthEndpoint("ignored")).toBe(
+      "https://tcb-api.tencentcloud.com/qcloud-tcb/v1/oauth",
+    );
+    expect(callArgs.custom).toBeUndefined();
+  });
+
+  it("auth(action=start_auth) should rewrite device endpoint and auth URL for intl site", async () => {
+    mockPeekLoginState.mockResolvedValue(null);
+    mockSupervisorLoginByWebAuth.mockImplementation(
+      async ({ onDeviceCode }: { onDeviceCode: (info: any) => void }) => {
+        onDeviceCode({
+          user_code: "WDJB-MJHT",
+          verification_uri:
+            "https://tcb.cloud.tencent.com/dev#/cli-auth?from=cli&flow=device",
+          device_code: "device-code",
+          expires_in: 600,
+        });
+        return new Promise(() => {});
+      },
+    );
+
+    process.env.TCB_SITE = "intl";
+    try {
+      const result = await tools.auth.handler({
+        action: "start_auth",
+        authMode: "device",
+      });
+      const payload = JSON.parse(result.content[0].text);
+
+      expect(payload).toHaveProperty("code", "AUTH_PENDING");
+      const callArgs = mockSupervisorLoginByWebAuth.mock.calls.at(-1)![0];
+      expect(callArgs.getOAuthEndpoint("ignored")).toBe(
+        "https://tcb-api.tencentcloud.com/qcloud-tcb/v1/oauth",
+      );
+      expect(
+        callArgs.getAuthUrl(
+          "https://tcb.cloud.tencent.com/dev#/cli-auth?from=cli&flow=device",
+        ),
+      ).toBe(
+        "https://tcb.tencentcloud.com/dev#/cli-auth?from=cli&flow=device",
+      );
+    } finally {
+      delete process.env.TCB_SITE;
+    }
+  });
+
+  it("auth(action=start_auth, site=intl) should switch to intl route even when TCB_SITE is unset", async () => {
+    mockPeekLoginState.mockResolvedValue(null);
+    mockSupervisorLoginByWebAuth.mockImplementation(
+      async ({ onDeviceCode }: { onDeviceCode: (info: any) => void }) => {
+        onDeviceCode({
+          user_code: "WDJB-MJHT",
+          verification_uri:
+            "https://tcb.cloud.tencent.com/dev#/cli-auth?from=cli&flow=device",
+          device_code: "device-code",
+          expires_in: 600,
+        });
+        return new Promise(() => {});
+      },
+    );
+
+    const result = await tools.auth.handler({
+      action: "start_auth",
+      authMode: "device",
+      site: "intl",
+    });
+    const payload = JSON.parse(result.content[0].text);
+
+    expect(payload).toHaveProperty("code", "AUTH_PENDING");
+    const callArgs = mockSupervisorLoginByWebAuth.mock.calls.at(-1)![0];
+    expect(callArgs.getOAuthEndpoint("ignored")).toBe(
+      "https://tcb-api.tencentcloud.com/qcloud-tcb/v1/oauth",
+    );
+    expect(
+      callArgs.getAuthUrl(
+        "https://tcb.cloud.tencent.com/dev#/cli-auth?from=cli&flow=device",
+      ),
+    ).toBe("https://tcb.tencentcloud.com/dev#/cli-auth?from=cli&flow=device");
+    // 站点写入环境变量，供本次登录后续环节与后续工具调用按同一站点解析
+    expect(process.env.TCB_SITE).toBe("intl");
+  });
+
+  it("auth(action=status, site=<invalid>) should reject invalid site value", async () => {
+    const result = await tools.auth.handler({
+      action: "status",
+      site: "us-east",
+    });
+    const payload = JSON.parse(result.content[0].text);
+
     expect(payload).toHaveProperty("code", "INVALID_ARGS");
-    expect(payload.message).toContain("oauthEndpoint");
+    // 断言按词典键构造（语言无关），避免把用例绑死在中文字面量上
+    expect(payload.message).toBe(t("env.auth.invalidSite", { site: "us-east" }));
   });
 
   it("auth(action=start_auth, authMode=web) should continue environment preparation after login", async () => {
@@ -909,7 +1031,25 @@ describe("env tools - auth", () => {
 
     expect(payload).toHaveProperty("ok", false);
     expect(payload).toHaveProperty("code", "INVALID_ARGS");
-    expect(payload.message).toContain("apiKey 和 envId");
+    expect(payload.message).toContain("apiKey 和 apiKeyEnvId");
+    // 提示里的字段名必须是实现真正读取的那一个（rawArgs.apiKeyEnvId），
+    // 否则模型照着 next_step 重试会一直卡在 INVALID_ARGS。
+    expect(payload.next_step.suggested_args).toHaveProperty("apiKeyEnvId");
+    expect(payload.next_step.suggested_args).not.toHaveProperty("envId");
+  });
+
+  it("auth(action=login_by_api_key) suggested_args should be replayable without INVALID_ARGS", async () => {
+    // 回归：next_step.suggested_args 曾写成 envId，而实现只读 apiKeyEnvId，
+    // 于是「照提示重试」必然再次 INVALID_ARGS —— 模型陷入死循环。
+    const invalid = await tools.auth.handler({ action: "login_by_api_key" });
+    const invalidPayload = JSON.parse(invalid.content[0].text);
+    const suggested = invalidPayload.next_step.suggested_args;
+
+    // 把提示里的参数原样回传，必须能进入真实登录流程（而不是再次被判缺参）
+    const replayed = await tools.auth.handler({ ...suggested });
+    const replayedPayload = JSON.parse(replayed.content[0].text);
+
+    expect(replayedPayload.code).not.toBe("INVALID_ARGS");
   });
 
   it("auth(action=login_by_api_key) should succeed when peekLoginState returns credentials", async () => {
@@ -978,6 +1118,8 @@ describe("env tools - auth", () => {
 
     expect(payload).toHaveProperty("ok", false);
     expect(payload).toHaveProperty("code", "API_KEY_AUTH_FAILED");
+    // 三个 next_step 出口都要给出实现真正读取的字段名，只锁一处会漏掉回归
+    expect(payload.next_step.suggested_args).toHaveProperty("apiKeyEnvId");
 
     // env vars should be cleaned up on failure
     expect(process.env.CLOUDBASE_API_KEY).toBeUndefined();
@@ -997,6 +1139,8 @@ describe("env tools - auth", () => {
     expect(payload).toHaveProperty("ok", false);
     expect(payload).toHaveProperty("code", "API_KEY_AUTH_FAILED");
     expect(payload.message).toContain("network error");
+    // 异常出口同样要给出实现真正读取的字段名
+    expect(payload.next_step.suggested_args).toHaveProperty("apiKeyEnvId");
 
     // env vars should be cleaned up on exception
     expect(process.env.CLOUDBASE_API_KEY).toBeUndefined();
@@ -1738,6 +1882,155 @@ describe("env tools - envQuery", () => {
     });
   });
 
+  it("envQuery(domains) should resolve the manager against the requested envId", async () => {
+    mockGetCloudBaseManager.mockResolvedValue({
+      env: {
+        getEnvAuthDomains: vi.fn().mockResolvedValue({ Domains: [] }),
+      },
+    });
+
+    const { tools } = createMockServer();
+    await tools.queryEnv.handler({ action: "domains", envId: "env-override" });
+
+    expect(mockGetCloudBaseManager).toHaveBeenCalledWith(
+      expect.objectContaining({
+        cloudBaseOptions: expect.objectContaining({
+          envId: "env-override",
+        }),
+      }),
+    );
+  });
+
+  it("envQuery(list) should report region as ignored under env-scoped credentials", async () => {
+    mockGetCloudBaseManager.mockResolvedValue({
+      env: {
+        describeEnvInfo: vi.fn().mockResolvedValue({
+          EnvInfo: {
+            EnvBaseInfo: {
+              EnvId: "env-test",
+              Alias: "bound",
+              Region: "ap-singapore",
+            },
+          },
+        }),
+      },
+      commonService: vi.fn(() => ({
+        call: vi.fn().mockResolvedValue({ EnvList: [] }),
+      })),
+    });
+
+    const { server, tools } = createMockServer();
+    (server as any).cloudBaseOptions.credentialScope = "env";
+
+    const payload = JSON.parse(
+      (await tools.queryEnv.handler({ action: "list", region: "ap-shanghai" })).content[0].text,
+    );
+
+    expect(payload.credential_scope).toBe("single_env");
+    expect(payload.EnvList).toEqual([
+      { EnvId: "env-test", Alias: "bound", Region: "ap-singapore" },
+    ]);
+    // region 没有参与查询：不得回显成「已按 ap-shanghai 过滤」
+    expect(payload.AppliedFilters.region).toBeNull();
+    expect(payload.AppliedFilters.currentEnvOnly).toBe(true);
+    // query_region 表示结果实际落在哪：pinned 分支要用绑定环境自身的 Region，
+    // 而不是凭据/配置默认地域（本例配置是 ap-guangzhou，环境在 ap-singapore）
+    expect(payload.query_region).toBe("ap-singapore");
+    expect(payload.ignored_params).toEqual([
+      {
+        name: "region",
+        value: "ap-shanghai",
+        reason: "环境级凭证为单环境权限，region 不参与查询；结果恒为绑定环境",
+      },
+    ]);
+    expect(payload.scope_note).toContain('已忽略 region="ap-shanghai"');
+  });
+
+  it("envQuery(list) should still report region when account-level credentials apply it", async () => {
+    mockGetCloudBaseManager.mockResolvedValue({
+      commonService: vi.fn(() => ({
+        call: vi.fn().mockResolvedValue({
+          EnvList: [{ EnvId: "env-other", Alias: "other", Region: "ap-shanghai" }],
+        }),
+      })),
+      env: { listEnvs: vi.fn() },
+    });
+
+    const { tools } = createMockServer();
+    const payload = JSON.parse(
+      (await tools.queryEnv.handler({ action: "list", region: "ap-shanghai" })).content[0].text,
+    );
+
+    expect(payload.credential_scope).toBe("account");
+    expect(payload.AppliedFilters.region).toBe("ap-shanghai");
+    expect(payload.query_region).toBe("ap-shanghai");
+    expect(payload.ignored_params).toBeUndefined();
+  });
+
+  it("envQuery(list) should not report ignored_params when region is absent on the pinned path", async () => {
+    process.env.CLOUDBASE_ENV_ID = "env-test";
+
+    mockGetCloudBaseManager.mockResolvedValue({
+      env: {
+        describeEnvInfo: vi.fn().mockResolvedValue({
+          EnvInfo: {
+            EnvBaseInfo: { EnvId: "env-test", Alias: "bound", Region: "ap-shanghai" },
+          },
+        }),
+      },
+      commonService: vi.fn(() => ({
+        call: vi.fn().mockResolvedValue({ EnvList: [] }),
+      })),
+    });
+
+    const { server, tools } = createMockServer();
+    (server as any).cloudBaseOptions.credentialScope = "env";
+
+    const payload = JSON.parse(
+      (await tools.queryEnv.handler({ action: "list" })).content[0].text,
+    );
+
+    // 没传 region 就没有「被忽略的参数」可说，不能凭空造一条
+    expect(payload.ignored_params).toBeUndefined();
+    expect(payload.AppliedFilters.region).toBeNull();
+    expect(payload.AppliedFilters.currentEnvOnly).toBe(true);
+    // pinned 结果就是绑定环境本身，query_region 如实回落到该环境的 Region
+    expect(payload.query_region).toBe("ap-shanghai");
+  });
+
+  it("envQuery(list) should keep the pinned env when CLOUDBASE_ENV_ID differs from the bound envId", async () => {
+    process.env.CLOUDBASE_ENV_ID = "env-from-var";
+
+    mockGetCloudBaseManager.mockResolvedValue({
+      env: {
+        describeEnvInfo: vi.fn().mockResolvedValue({
+          EnvInfo: {
+            EnvBaseInfo: { EnvId: "env-from-var", Alias: "var-bound", Region: "ap-singapore" },
+          },
+        }),
+      },
+      commonService: vi.fn(() => ({
+        call: vi.fn().mockResolvedValue({ EnvList: [] }),
+      })),
+    });
+
+    const { server, tools } = createMockServer();
+    (server as any).cloudBaseOptions.credentialScope = "env";
+
+    const payload = JSON.parse(
+      (await tools.queryEnv.handler({ action: "list", region: "ap-shanghai" })).content[0].text,
+    );
+
+    // 过滤必须按真正查询到的 envId（CLOUDBASE_ENV_ID），
+    // 否则会把唯一的结果滤掉，回执变成空列表
+    expect(payload.EnvList).toEqual([
+      { EnvId: "env-from-var", Alias: "var-bound", Region: "ap-singapore" },
+    ]);
+    expect(payload.TotalCount).toBe(1);
+    expect(payload.AppliedFilters.currentEnvOnly).toBe(true);
+    expect(payload.query_region).toBe("ap-singapore");
+  });
+
   it("envDomainManagement(create) should return structured polling guidance", async () => {
     const createEnvDomain = vi.fn().mockResolvedValue({
       RequestId: "req-create-domain",
@@ -1849,8 +2142,9 @@ describe("env tools - envQuery", () => {
       tools.queryEnv.meta.inputSchema.period.unwrap().options.map((item: { value: number }) => item.value),
     ).toEqual([...ENV_METRIC_PERIOD_VALUES]);
     expect(tools.envQuery.meta.inputSchema.action.options).toContain("metrics");
-    expect(tools.queryEnv.meta.description).toContain("action=metrics");
-    expect(tools.queryEnv.meta.description).toContain("DescribeCurveData");
+    const queryEnvDescription = t(tools.queryEnv.meta.description as MessageKey);
+    expect(queryEnvDescription).toContain("action=metrics");
+    expect(queryEnvDescription).toContain("DescribeCurveData");
   });
 
   it("envQuery(usage) should require envId", async () => {
@@ -1858,6 +2152,9 @@ describe("env tools - envQuery", () => {
     const result = await tools.queryEnv.handler({ action: "usage" });
     expect(result.content[0].text).toContain("envId 为必填参数");
     expect(result.content[0].text).toContain("queryEnv");
+    // ⚠️ F7：纯文本失败回执没有 { success: false } 可嗅，必须显式带 isError=true，
+    // 否则只看 isError 的客户端会把这次失败当成功。
+    expect(result.isError).toBe(true);
   });
 
   it("envQuery(usage) should call account circle + credits usage APIs", async () => {
@@ -2404,9 +2701,17 @@ describe("manageEnv", () => {
       code: "CONFIRM_REQUIRED",
     });
     expect(payload.message).toContain("确认");
-    expect(payload.message).toContain("flexdb, storage, function, postgresql");
-    expect(payload.message).not.toContain("地域:");
-    expect(payload.message).toContain("CreateEnv 不接受 Region");
+    expect(payload.message).toContain("storage, function, postgresql");
+    // 未显式传 region 时，摘要回显会话地域（mock server 的 cloudBaseOptions.region）
+    expect(payload.message).toContain("地域: ap-guangzhou");
+    expect(payload.message).toContain("按 X-TC-Region 语义生效");
+    // 未显式指定地域时不应出现「二次调用需重复带 region」的提示
+    expect(payload.message).not.toContain("本次已显式指定地域");
+    expect(payload.next_step).toMatchObject({
+      region: "ap-guangzhou",
+      regionSource: "session",
+    });
+    expect(payload.next_step.requiredParams).not.toContain("region");
     // 询价失败时应降级，仍返回 confirm 并暴露 pricing.inquiryFailed
     expect(payload.pricing?.inquiryFailed).toBe(true);
     expect(payload.release_method?.method).toBe("手动销毁");
@@ -2441,6 +2746,127 @@ describe("manageEnv", () => {
       text: expect.stringContaining("我已知晓"),
     });
     expect(payload.release_method?.detail).toContain("资源释放方式");
+  });
+
+  it("create 摘要的地域与「会话 manager 使用的地域」同口径", async () => {
+    // 回归保护：resolvePricingRegion 曾硬编码 ap-shanghai，于是国际站会话的确认页展示
+    // ap-shanghai、实际环境却创建在 ap-singapore（b453f0a5e 修的就是这个）。
+    // 它必须是 resolveSiteAndRegion 的同口径，而不是某个字面量 —— 否则「确认页说的地域」
+    // 与「实际创建的地域」会不一致。
+    //
+    // 分工：单点场景（TCB_SITE=intl → ap-singapore 的字面量）已由
+    // 「create preview falls back to the resolved site region when the session has no region」
+    // 与 utils/site-map.test.ts 钉住；这里补的是**形状矩阵** —— 保证四个输入形状
+    // 用的是同一个口径，防止有人对某个形状特判（比如又写回一个字面量默认值）。
+    const cases = [
+      { label: "仅会话 envId（默认站点）", options: { envId: "env-test" } },
+      { label: "site=intl 且无 region", options: { envId: "env-test", site: "intl" } },
+      { label: "site=domestic 且无 region", options: { envId: "env-test", site: "domestic" } },
+      { label: "显式 region 优先于站点默认", options: { envId: "env-test", region: "ap-guangzhou" } },
+    ];
+
+    for (const testCase of cases) {
+      vi.clearAllMocks();
+      mockPeekLoginState.mockResolvedValue({
+        secretId: "sid",
+        secretKey: "skey",
+        envId: "env-test",
+        token: "token",
+      });
+      mockGetCloudBaseManager.mockResolvedValue({ env: { createEnv: vi.fn() } } as any);
+
+      const { tools } = createMockServer("TestIDE", undefined, testCase.options);
+      const payload = JSON.parse(
+        (
+          await tools.manageEnv.handler({
+            action: "create",
+            alias: "my-env",
+            packageId: "baas_personal",
+          })
+        ).content[0].text,
+      );
+
+      const expected = resolveSiteAndRegion(testCase.options).region;
+      expect({
+        label: testCase.label,
+        region: payload.next_step?.region,
+        hasRegionInMessage: payload.message?.includes(`地域: ${expected}`),
+      }).toMatchObject({
+        label: testCase.label,
+        region: expected,
+        hasRegionInMessage: true,
+      });
+    }
+  });
+
+  it("create should apply an explicit region via the request context, not the CreateEnv body", async () => {
+    const createEnv = vi.fn().mockResolvedValue({ EnvId: "env-new" });
+    const describeBillingInfo = vi.fn().mockResolvedValue({
+      EnvBillingInfoList: [{ EnvId: "env-new", Region: "ap-singapore" }],
+    });
+    mockGetCloudBaseManager.mockResolvedValue({
+      env: {
+        createEnv,
+        describeBillingInfo,
+        describeBaasPackageList: vi.fn().mockResolvedValue({ PackageList: [] }),
+      },
+    } as any);
+
+    const { tools } = createMockServer();
+
+    // 1) 确认前：摘要回显地域，并要求二次调用带上同一个 region
+    const preview = JSON.parse(
+      (
+        await tools.manageEnv.handler({
+          action: "create",
+          alias: "my-env",
+          packageId: "baas_personal",
+          region: "ap-singapore",
+        })
+      ).content[0].text,
+    );
+    expect(preview).toMatchObject({ ok: false, code: "CONFIRM_REQUIRED" });
+    expect(preview.message).toContain("地域: ap-singapore");
+    expect(preview.message).toContain("本次已显式指定地域");
+    expect(preview.next_step).toMatchObject({
+      region: "ap-singapore",
+      regionSource: "explicit",
+    });
+    expect(preview.next_step.requiredParams).toContain("region");
+
+    // 2) 确认后：manager 必须按显式地域重建（X-TC-Region 上下文），CreateEnv 请求体不含 Region
+    const created = JSON.parse(
+      (
+        await tools.manageEnv.handler({
+          action: "create",
+          alias: "my-env",
+          packageId: "baas_personal",
+          region: "ap-singapore",
+          confirm: "yes",
+        })
+      ).content[0].text,
+    );
+
+    expect(createEnv).toHaveBeenCalledWith({
+      Alias: "my-env",
+      PackageId: "baas_personal",
+      Resources: ["storage", "function", "postgresql"],
+      Period: 1,
+    });
+    expect(mockGetCloudBaseManager).toHaveBeenCalledWith(
+      expect.objectContaining({
+        cloudBaseOptions: expect.objectContaining({ region: "ap-singapore" }),
+        requireEnvId: false,
+      }),
+    );
+    expect(created).toMatchObject({
+      ok: true,
+      code: "ENV_CREATED",
+      envId: "env-new",
+      region: "ap-singapore",
+      regionSource: "explicit",
+      verifiedRegion: "ap-singapore",
+    });
   });
 
   it("create should show free-experience disclosure when packageId hints free tier", async () => {
@@ -2568,7 +2994,7 @@ describe("manageEnv", () => {
           action: "create",
           alias: "my-env",
           packageId: "baas_personal",
-          resources: ["flexdb", "storage", "function", "postgresql"],
+          resources: ["storage", "function", "postgresql"],
           duration: 1,
           confirm: "yes",
         })
@@ -2582,14 +3008,14 @@ describe("manageEnv", () => {
       Alias: "my-env",
       PackageId: "baas_personal",
       Period: 1,
-      Resources: ["flexdb", "storage", "function", "postgresql"],
+      Resources: ["storage", "function", "postgresql"],
     });
     expect(createEnv.mock.calls[0][0]).not.toHaveProperty("Region");
     expect(payload).toMatchObject({
       ok: true,
       code: "ENV_CREATED",
       envId: "env-new-123",
-      resources: ["flexdb", "storage", "function", "postgresql"],
+      resources: ["storage", "function", "postgresql"],
     });
   });
 
@@ -2631,13 +3057,88 @@ describe("manageEnv", () => {
       Alias: "default-res",
       PackageId: "baas_personal",
       Period: 1,
-      Resources: ["flexdb", "storage", "function", "postgresql"],
+      Resources: ["storage", "function", "postgresql"],
     });
     expect(payload).toMatchObject({
       ok: true,
       code: "ENV_CREATED",
       envId: "env-default-resources",
     });
+  });
+
+  it("create preview falls back to the resolved site region when the session has no region", async () => {
+    // 会话未提供 region 时必须回落到「站点默认地域」（国际站 ap-singapore），
+    // 而不是硬编码 ap-shanghai —— 否则确认页展示的地域与实际创建出的环境不一致。
+    const prevSite = process.env.TCB_SITE;
+    const prevRegion = process.env.TCB_REGION;
+    process.env.TCB_SITE = "intl";
+    delete process.env.TCB_REGION;
+    try {
+      const createEnv = vi.fn().mockResolvedValue({ EnvId: "env-site-default" });
+      const describeBillingInfo = vi
+        .fn()
+        .mockResolvedValue({ EnvBillingInfoList: [] });
+      mockGetCloudBaseManager.mockResolvedValue({
+        env: {
+          createEnv,
+          describeBillingInfo,
+          describeBaasPackageList: vi
+            .fn()
+            .mockResolvedValue({ PackageList: [] }),
+        },
+      } as any);
+
+      // 显式清掉会话 region，逼出「站点默认地域」这一级
+      const { tools } = createMockServer("TestIDE", undefined, {
+        envId: "env-test",
+      });
+      const preview = JSON.parse(
+        (
+          await tools.manageEnv.handler({
+            action: "create",
+            alias: "site-default-env",
+            packageId: "baas_personal",
+          })
+        ).content[0].text,
+      );
+
+      expect(preview).toMatchObject({ ok: false, code: "CONFIRM_REQUIRED" });
+      expect(preview.message).toContain("地域: ap-singapore");
+      expect(preview.next_step).toMatchObject({
+        region: "ap-singapore",
+        regionSource: "session",
+      });
+    } finally {
+      if (prevSite === undefined) {
+        delete process.env.TCB_SITE;
+      } else {
+        process.env.TCB_SITE = prevSite;
+      }
+      if (prevRegion === undefined) {
+        delete process.env.TCB_REGION;
+      } else {
+        process.env.TCB_REGION = prevRegion;
+      }
+    }
+  });
+
+  it("create schema should no longer accept flexdb in resources", () => {
+    const { tools } = createMockServer();
+    const resourcesSchema = tools.manageEnv.meta.inputSchema.resources;
+
+    // 省略时由 resolveCreateEnvResources 兜底，默认值不再包含 flexdb
+    expect(resolveCreateEnvResources(undefined)).toEqual([
+      "storage",
+      "function",
+      "postgresql",
+    ]);
+    expect(resourcesSchema.parse(["storage", "postgresql"])).toEqual([
+      "storage",
+      "postgresql",
+    ]);
+    // 显式传 flexdb 必须被 schema 拒绝，而不是静默透传给 CreateEnv
+    expect(() => resourcesSchema.parse(["flexdb"])).toThrow();
+    expect(() => resourcesSchema.parse(["storage", "flexdb"])).toThrow();
   });
 
   it("modifyPlan should require confirm before execution", async () => {

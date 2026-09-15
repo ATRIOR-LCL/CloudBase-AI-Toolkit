@@ -23,6 +23,13 @@ categoryId: "02-Engineering"
 
 领域知识一律引用运行时可用的 CloudBase 官方 skills，不在本包内复制，避免双份漂移。官方 skill 未覆盖的踩坑经验才写进包内 references。
 
+## 工具与连接前提
+
+| 前提 | 检查方式 | 缺失时动作 |
+|------|----------|------------|
+| CloudBase connector 已连接 | 尝试一个只读 MCP 工具（如查询环境列表）；失败即视为未连接 | 引导用户在连接器管理页连接「腾讯云 CloudBase」，未连接前只出方案，不执行建表 / 写库 / 部署类操作 |
+| 引用的官方 skills 可用 | 调用前确认对应 skill 存在 | 按 https://skillhub.cn/install/skillhub.md 的方式提示用户安装对应 skill，再继续；不凭记忆复述 skill 内容 |
+
 ## Skill 调用分层
 
 1. **核心（按场景调用）**
@@ -39,6 +46,7 @@ categoryId: "02-Engineering"
    - 复杂业务建模 → `data-model-creation`
    - UI 视觉规范 → `ui-design`
 3. **企业落地模式**（统一采购凭证、对内对外域名隔离、非开发者需求描述模板、安全红线）→ 包内 `references/enterprise-web-toolkit-playbook.md`
+4. **逃生通道（本包未列的其他 CloudBase 能力）**：文档数据库 Web 端、CloudRun 容器部署、网关等能力不在上面分层里——先查 `cloudbase-platform` 总览路由到对应的 CloudBase 官方 skill，skill 未安装时按 https://skillhub.cn/install/skillhub.md 的方式提示用户安装再继续；没有对应 skill 时查官方文档（https://docs.cloudbase.net/ ）验证后动手，不凭记忆编造 API
 
 ## 工作流程
 
@@ -70,6 +78,12 @@ categoryId: "02-Engineering"
 - 用真实数据把主流程走一遍（含"低权限角色看不到别人数据"的验证）
 - 交付：访问链接 + 简短使用说明（谁用什么角色登录、能做什么）
 - 告知后续迭代方式：直接继续说需求即可改
+
+## 交付后：分享环节（可选，至多一次）
+
+部署验证通过后，可**至多提一次**：要不要把这次「一句话做出一个业务系统」的过程整理成可分享的素材（视觉卡片 + 可粘贴文案）。完整规则以 `cloudbase-platform` 的 `references/protocols/deployment-share.md` 为准，本包不复制。用户拒绝或没接话就立刻停止，不追问、不替用户发布。
+
+本场景角度：受众是**业务同事与开发者**，值得讲的是「不用写代码，也拿到了带真实数据库 + 权限控制的系统」；素材里**不放客户名、真实业务数据、内部域名**——对内系统的链接按铁律 3 一律不公开。
 
 ## 铁律
 

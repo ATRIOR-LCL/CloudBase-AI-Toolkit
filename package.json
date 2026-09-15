@@ -4,6 +4,8 @@
   "packageManager": "pnpm@10.8.0",
   "scripts": {
     "check:readme-sync": "node scripts/check-readme-sync.js",
+    "check:i18n-coverage": "node mcp/scripts/check-i18n-coverage.mjs",
+    "update:i18n-baseline": "node mcp/scripts/check-i18n-coverage.mjs --update",
     "update:compat-baseline": "node scripts/update-compat-baseline.mjs",
     "check:compat-diff": "node scripts/diff-compat-config.mjs",
     "sync:claude-skills-mirror": "node scripts/sync-claude-skills-mirror.mjs",
@@ -22,6 +24,8 @@
     "analyze:plugin-marketplaces": "node scripts/analyze-plugin-marketplace.mjs",
     "check:plugin-marketplaces": "node scripts/check-plugin-marketplaces.mjs",
     "check:plugin-quality": "node scripts/check-plugin-quality.mjs",
+    "check:prompts-sync": "node scripts/check-prompts-sync.mjs",
+    "check:prompts-links": "node scripts/check-prompts-sync.mjs --check-links",
     "sync:codebuddy-marketplace": "node scripts/sync-codebuddy-marketplace.mjs",
     "experts:sync": "node scripts/sync-experts.mjs",
     "pack:qoder-plugin": "node scripts/pack-qoder-plugin.mjs",
@@ -43,7 +47,7 @@
     "vitest": "3.2.7"
   },
   "dependencies": {
-    "@cloudbase/manager-node": "5.8.3"
+    "@cloudbase/manager-node": "5.8.6"
   },
   "pnpm": {
     "overrides": {

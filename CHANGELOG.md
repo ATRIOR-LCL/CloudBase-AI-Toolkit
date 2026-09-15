@@ -4,6 +4,55 @@ All notable changes to this project will be documented in this file. Follow the 
 
 ## Unreleased
 
+### Features
+
+* **i18n**: full internationalization of tool copy — all tool descriptions/titles and user-visible output messages now go through the `t(key)` dictionary (`mcp/src/i18n/`, 28 modules, zh as the source of truth with en translations kept in sync at compile time). Tool descriptions are registered as dictionary keys and resolved per instance language at registration time; unknown keys fall through unchanged.
+* **i18n**: instance-level language — `createCloudBaseMcpServer({ lang })` sets the output language for the whole instance. Resolution chain: per-call `lang` argument (auth tool) > instance `lang` option > `TCB_LANG` env > `.cloudbase/project.json` lang > default `zh`.
+* **auth**: new optional `site` (`domestic`/`intl`), `region` and `lang` (`zh`/`en`) arguments on the auth tool. `site` takes priority over the instance-level site config and flows through `start_auth` (device + web), `login_by_api_key` and `status`; `status` echoes the resolved `site`. `set_env` persists explicitly-passed `site`/`region`/`lang` to `.cloudbase/project.json` (merged write; derived values are never persisted and no file is created when nothing explicit is passed).
+* **site**: gateway and console URLs now resolve per site through `getGatewayBaseUrl` / `getConsoleDevUrl` helpers in `site-map.ts` — intl sites get `api.intl.tcloudbasegateway.com` and `tcb.tencentcloud.com`, domestic sites keep the existing hosts. Replaces hardcoded domains in storagePG, hosting and the interactive server.
+
+* **capi**: `callCloudApi` service allow-list expanded from 10 to 57 Tencent Cloud products, and it stays an **enum + version map** (`SERVICE_VERSIONS` in `mcp/src/tools/capi.ts`) rather than a free-form string: identifiers outside the list are still rejected before the request leaves the process, while products that previously forced a fallback to raw SDK calls — SSL certificates `ssl`, DNS records `dnspod`, domain registration `domain`, logs `cls`, MySQL `cdb`, CVM `cvm`, KMS `kms`, TCR `tcr`, CKafka `ckafka`, … — are now callable directly. `version` may be omitted for the 51 single-version products (resolved from the map); only the 6 multi-version products (`tke` / `mongodb` / `teo` / `vod` / `sms` / `monitor`) require it explicitly, and omitting it fails fast with the available versions instead of guessing one. The daily-synced api-reference index (https://docs.cloudbase.net/ai/cloudbase-ai-toolkit/api-reference.md) remains the first-stop Action lookup, and monitor auth-failure guidance still points to the official monitor API overview. `lowcode` (Weida low-code, only reachable as the data-model backend — not a public capability, and already blocked in evaluate mode) is removed from the list; the data-model tools keep calling it internally through the SDK, which does not go through this allow-list.
+
+* **capi**: `callCloudApi`'s `service` / `action` / `params` / `region` descriptions were cut down to one actionable sentence each (196 / 130 / 168 / 187 characters). They had grown into documentation — inline Action inventories, request examples, naming gotchas — which belongs in the `cloud-api-operations` skill references, not in a schema the model reads on every `tools/list`. The task that a description does carry is stated plainly: `service` must come from the enum, `params` must not carry `Region`, and so on, with a pointer to the skill for the details. Newly added `.describe()` entries over 200 characters are now rejected by the i18n guard (existing ones are grandfathered into the ratchet baseline), so the surface cannot quietly refill.
+
+* **rag**: `searchKnowledgeBase`'s description dropped from 14,135 to 1,444 characters (−90%, 58 → 20 lines) by removing the two inline catalogs — and nothing was lost, because both were already reaching the model as `skillName` / `apiName` **enums**: every skill and API name was being delivered twice, once in the schema and once in prose. What the prose copy uniquely carried was the per-skill `description` text, inlined in full, which is exactly what a client truncates first when the tool surface grows. That text is now served on demand: calling `mode=skill` without `skillName` (or `mode=openapi` without `apiName`) returns the current catalog with each entry's own `description` — the trigger wording itself — so the skills-disabled / IDE-cannot-read-skill-files fallback the paragraph exists for still works, one call later and without truncation. Across the 43-tool surface this is 139,627 → 126,880 characters (−9.1%) paid on every `tools/list`. The front-matter reader's `decsription` typo (a dead alternative in a regex that also matched the correct spelling) is gone with it.
+
+### Bug Fixes
+
+* **docs**: skill references no longer point at dead `docs.cloudbase.net/.../index.md` addresses. The site moved its Markdown sources from `<page>/index.md` to `<page>.md`, and the old form does not 404 — it answers with 200 plus the site's fallback page (the HTML carries 「页面不存在」), so a reader landed on a "page not found" shell and an agent fetched that shell as if it were the document. 23 links across the WeChat-integration, cloud-functions, cloudbase-platform, miniprogram-development and web-development skills now use `<page>.md`; all 14 site links referenced from `config/source` and `doc/prompts` return Markdown. A new `check-prompts-sync` check refuses any `<page>/index.md` address, while `/index` without the `.md` suffix stays allowed because it is a working rendered page. Hits under `plugin/cloudbase/skills/**` are reported as a warning only — that tree is synced from `TencentCloudBase/skills` and has to be fixed upstream.
+
+* **capi**: `sts` no longer inherits the SDK's built-in default version. `@cloudbase/manager-node` maps `sts` to `2018-04-16` (SCF's version) while the official STS version is `2018-08-13`, so calls such as `GetCallerIdentity` failed with a misleading `The request action=... is invalid or not found in service=sts and version=2018-04-16`. The version map pins `sts` to `2018-08-13`, so calls that omit `version` now get the correct value instead of the SDK's wrong one.
+
+* **i18n**: `setInstanceLang` was never called by the server, so the `lang` option of `createCloudBaseMcpServer` only affected tool descriptions — every tool's output messages stayed in Chinese. The resolved instance language is now propagated to the i18n module before tools register.
+* **i18n**: parameter-level validation messages now follow the instance language. Four zod `.refine()` messages were written as `{ message: t("...") }` inside **module-level** schemas, so they were evaluated at import time — before `setInstanceLang()` runs — and permanently froze to the resolution chain's fallback language. On an `en` instance the affected rules (`functionDeploySchema.tagNoLatest`, `functionDeploySchema.buildCwdAbsolute`, `functionDeploySchema.buildDockerfileSafeRelative`, `functions.timerCron.refine`) silently returned Chinese with no error, which is harder to notice than a plain hardcoded string. They now use the callback form `() => ({ message: t("...") })`, evaluated per validation at request time, and the i18n guard rejects the eager form at the top level of a module so it cannot come back.
+* **env**: `queryEnv(action="list")` no longer misreports how filters were applied, and `queryEnv(action="domains")` no longer ignores `envId`. Under env-scoped credentials (hosted OAuth token / API Key) the list path pins to the bound env and never sends `region` to `DescribeEnvs`, yet the response still echoed the requested region into `AppliedFilters.region` / `query_region` and flipped `currentEnvOnly` to `false` while returning the bound environment — so callers (and agents) could read the environment's region wrong. Those fields now reflect what actually ran: `AppliedFilters.region` is null and a new `ignored_params` entry plus a `scope_note` explain the credential boundary, while `query_region` reports the returned environment's own region on the pinned path. The "current environment only" filter now also keys off the envId actually queried (`CLOUDBASE_ENV_ID` can differ from the bound `envId`), so a pinned result can no longer be filtered away into an empty list. Separately, `action=domains` called `getManager()` and silently returned the bound environment's domains even when another `envId` was passed (dangerous when configuring Web security domains); it now resolves through `getManagerForEnvQuery(envId)` like `info` / `usage` / `metrics`, so a cross-environment lookup fails explicitly on the credential boundary instead of answering for the wrong environment.
+* **env**: `manageEnv(action="create")` no longer misreports the region it will create in, and `resources` no longer offers `flexdb`. The confirm summary resolved its region through a hardcoded `ap-shanghai` tail (`cloudBaseOptions.region` → `TCB_REGION` → `ap-shanghai`), while the session manager the create actually runs through resolves via `resolveSiteAndRegion` — so on an intl session the summary announced `ap-shanghai` while the environment landed in `ap-singapore`, and a project-config / `cloudbaserc.json` region was ignored by the summary altogether. The fallback now goes through the same resolver as the manager (site default: `ap-shanghai` domestic, `ap-singapore` intl), so the confirmed summary matches what is created. The `region` schema keeps its own `CREATE_ENV_REGIONS` constant rather than reusing the query-region set, and the documented example no longer uses whitelist-gated `ap-guangzhou`. Separately, `flexdb` is removed from `resources` (`CREATE_ENV_RESOURCE_VALUES` is now `storage` / `function` / `postgresql`): new environments are created without a NoSQL tenant, and passing `flexdb` is rejected by the schema instead of being silently forwarded to CreateEnv. NoSQL availability is a runtime property of an environment — read it from `queryEnv(action="info")` → `EnvInfo.RuntimeBackends`.
+* **auth**: international-site (`TCB_SITE=intl`) device-flow login now rewrites the OAuth endpoint and verification page to the intl hosts (`tcb-api.tencentcloud.com` / `tcb.tencentcloud.com`). The auth tool's `start_auth` device branch called `loginByWebAuth` directly and bypassed the intl rewrite in `ensureLogin`, so intl accounts kept getting domestic-site device codes that can never be authorized (the device-code registries are isolated per site). Both paths now share one `buildDeviceLoginOptions` helper.
+* **auth**: allow `oauthCustom: false` together with an explicit `oauthEndpoint` — required for standard `{code,result}`-wrapped endpoints such as the intl OAuth backend; previously the tool rejected this combination outright.
+* **auth**: `auth(action="login_by_api_key")` no longer hints a parameter name the tool cannot read. The missing-arguments error and `next_step.suggested_args` both said `envId`, while the schema and the handler only read `apiKeyEnvId` — so replaying the hint verbatim (exactly what an agent does after a failed call) returned the same `INVALID_ARGS` with an unchanged message, a loop that retrying can never break. `apiKeyEnvId` is the name the feature was introduced with and carries in the schema, so the message and the suggested arguments now use it; the parameters themselves are unchanged and `envId` keeps its `set_env` meaning. A regression test replays `next_step.suggested_args` as-is and requires the result to stop being `INVALID_ARGS`, so hint and implementation can no longer drift apart silently.
+
+* **docs**: `searchKnowledgeBase(mode="docs", action="readDoc")` returns Markdown again. `docs.cloudbase.net` moved its Markdown sources from `<page>/index.md` to `<page>.md`, while `@cloudbase/manager-node`'s `DocsService.readDoc()` still appends `/index.md` — and the site answers unknown paths with **200 + the SPA HTML shell**, so the SDK silently handed back a whole HTML page as "document content" rather than failing. Measured against the live site, the old addressing produced the shell for **all 53 sampled docs**, which is why this read as a content bug instead of an error. `readDoc` now normalizes the path before delegating (including the `<page>/index.md` form that older skill docs still carry, and `/index`-style landing pages), and turns an HTML shell response into an explicit failure that names the Markdown address it tried and offers the rendered page URL as a fallback, instead of feeding the HTML to the model. The response also carries the resolved `markdownPath`. Because the SDK passes any path already ending in `.md` straight through, an SDK-side fix needs no follow-up here. A few sections are not covered by the move yet — `/http-api/**` serves no Markdown at all — and those now fail loudly instead of returning 17 KB of site HTML.
+
+* **gateway**: `manageGateway(action="createRoute")` no longer registers a route whose upstream does not exist. The route was written unconditionally, so a typo in `upstreamResourceId` (or a function name belonging to another environment) produced a route that resolved to a 404 at request time with nothing in the response explaining why. The tool now probes the upstream — `functions.getFunctionList` for `SCF` / `WEB_SCF`, `cloudrun.list` for `CBR` — and returns `success: false` with the closest matching names plus a read-only next step instead of persisting anything. Probes are fail-open by design: `STATIC_STORE` / `LH` upstreams and environments where the list API is unavailable are recorded as `unknown` and the route is created as before, because failing to prove the upstream is missing is not proof that it is.
+
+* **apps**: `queryApps(action="getBuildLog")` accepts the `BuildId` that `deployApp` returns. The deploy response carries `BuildId` as a **number** while the schema declared `buildId` as a string, so the natural round-trip — deploy, then poll the log with the id you were just handed — was rejected by the schema before a request was ever sent, and an agent could only recover by calling the tool a second time with a quoted id. `buildId` now accepts both forms (`z.union([z.string(), z.number()])`, normalized to a string) and is converted to the `Integer` that `DescribeCloudBaseRunBuildLog` documents at the call site, with an explicit error for non-numeric ids instead of a platform-side type error.
+
+* **apps**: `deployApp`'s `cosTimestamp` no longer rejects the value `queryApps(action="getUploadUrl")` produces. The schema used `z.coerce.number()` with `exclusiveMinimum: 0`, so it advertised an integer to the model while `getUploadUrl` documents its `unixTimestamp` as a string — the two halves of one cloud-upload flow disagreed about the type of the value they hand each other, and a strict client sending the documented string had it coerced into a number and refused at the boundary. `cosTimestamp` is now `z.union([z.string(), z.number()])` normalized to a non-empty decimal string, and the handler normalizes identically on both the local-upload and pre-signed-URL paths.
+
+* **hosting**: delete verification is no longer fooled by a sibling key sharing the same prefix, and no longer passes silently on COS-shaped responses. After `deleteFiles`, the object is re-read to confirm it is gone — but `findFiles` is **prefix** semantics, so deleting `/a/b.txt` while `/a/b.txt.bak` still existed was reported as "deletion not verified", and the list was read through `Array.isArray`, which is false for the COS `{ Contents: [...] }` shape and turned the check into a silent pass. The single-file path now compares the exact `Key` (tolerating a leading slash) and the list is normalized before use; `verified` keeps meaning "that path does not exist now".
+
+* **cloudrun**: the "environment not opened" guard now recognizes the localized error the platform actually returns. `ensureCloudRunEnvInitialized`, `queryCloudRun(action="envStatus")` and `manageCloudRun(action="initEnv")` each matched a hardcoded English `ResourceNotFound`, but the same failure also arrives as 「资源不存在」 or as an `error.code` with no message, so it fell through and surfaced as a raw SDK error instead of the `initEnv` guidance — on the one action meant to explain it. The three copies of the predicate are now one exported helper that inspects both the code and the message.
+
+* **env**: plain-text tool failures now set `isError: true`. Four catch paths in the env tool returned a human-readable explanation as ordinary text, which `withBusinessFailureIsError` cannot classify (it only recognizes a structured `{ success: false }` payload), so a failed call arrived looking like a success whose content happened to be an error message. They now build their result through `buildTextErrorResult`. Structured failures are unchanged — they already carry the marker.
+
+* **capi**: `callCloudApi`'s description no longer ships unsubstituted placeholders. The description was registered as a bare dictionary key while the two documentation URLs were only passed on the error path, so every `tools/list` — in both languages — returned the literal `{controlPlaneUrl}` and `{dependencyUrl}` to the client. The URLs are interpolated at registration time. `{layerName}` / `{region}` are deliberate format placeholders and are untouched.
+
+* **docs**: the `queryPermissions` / `managePermissions` descriptions now state the PostgreSQL capability boundary. Role actions (`listRoles`, `getRole`, `createRole`, `deleteRoles`, `updateRole`) are rejected outright on PostgreSQL environments with `The current API does not support PostgreSQL type environments.` — a platform boundary, not a configuration problem and not something retrying resolves. Both descriptions now say so and route to a mechanism that works: RLS via `managePgDatabase(action="execute")` with `CREATE POLICY`, or the console.
+
+### Continuous Integration
+
+* **ci**: the plugin-skill pull-back now runs *after* the upstream push instead of racing it. `Sync CloudBase Plugin Skills` and `Push Skills Repository` both listened on `config/source/skills/**`, so the two jobs started in the same second and the pull-back cloned `TencentCloudBase/skills` **before** the push had landed — it compared against its own `.sync-metadata.json`, found no drift, printed `No changes, skipping` and exited green while `plugin/cloudbase/skills/**` stayed a version behind until the next 12h cron. Observed on v2.34.2: pull-back started 16:23:00Z, the upstream push landed 16:23:16Z, and the plugin tree stayed on 2.34.1 for the rest of the day. `Push Skills Repository` now reports whether it pushed and dispatches the pull-back once the push has succeeded; the pull-back drops `config/source/skills/**` from its own triggers, keeping only its script and its workflow file, and the schedule stays as a safety net. Ordering is explicit instead of cron-covered.
+
 ## [2.33.0](https://github.com/TencentCloudBase/CloudBase-AI-Toolkit/compare/v2.32.5...v2.33.0) (2026-09-04)
 
 ### Features
@@ -57,7 +106,6 @@ All notable changes to this project will be documented in this file. Follow the 
 
 * **cloudrun**: `queryCloudRun(action="detail")` 默认脱敏服务环境变量（`ServerConfig.EnvParams` 的值置为 `***`，保留 key），新增 `revealEnvParams` 入参（默认 `false`）显式获取明文，避免带密码的连接串等敏感值进入模型上下文
 * **functions**: mask cloud-function environment variable values by default in `queryFunctions` (`getFunctionDetail` / `listFunctionTriggers`). The full raw SCF detail — including `Environment.Variables` plaintext — used to be returned to the model context on every read. Values are now replaced with `***` plus a `ValueLength` field (sufficient for config inspection and change verification); pass `revealEnvValues=true` to opt in to plaintext. Results written to the MCP server log are always masked, with no plaintext opt-out. Plaintext remains available via the console or `tcb fn detail` (fixes #971).
-
 
 ## [2.32.2](https://github.com/TencentCloudBase/CloudBase-AI-Toolkit/compare/v2.32.1...v2.32.2) (2026-08-25)
 
@@ -169,11 +217,9 @@ All notable changes to this project will be documented in this file. Follow the 
 
 ## [1.7.0](https://github.com/TencentCloudBase/CloudBase-AI-ToolKit/compare/v1.6.0...v1.7.0) (2025-06-10)
 
-
 ### 其他
 
 * update doc ([bd49e04](https://github.com/TencentCloudBase/CloudBase-AI-ToolKit/commit/bd49e0488b5ebcd16dd5d9c19a9ca801b1b0942c))
-
 
 ### 新功能
 
@@ -181,7 +227,6 @@ All notable changes to this project will be documented in this file. Follow the 
 * 增加规则 交互式反馈规则：在需求不明确时主动与用户对话澄清，优先使用自动化工具完成配置。执行高风险操作前必须获得用户确认。环境管理通过login/logout工具完成，交互对话使用interactiveDialog工具处理需求澄清和风险确认。简单修改无需确认，关键节点（如部署、数据删除）需交互，保持消息简洁并用emoji标记状态。 ([c234e9a](https://github.com/TencentCloudBase/CloudBase-AI-ToolKit/commit/c234e9a065fc23181125cacafcee0a6d75773762))
 
 ## [1.6.0](https://github.com/TencentCloudBase/CloudBase-AI-ToolKit/compare/v1.5.0...v1.6.0) (2025-06-06)
-
 
 ### 其他
 
@@ -192,7 +237,6 @@ All notable changes to this project will be documented in this file. Follow the 
 * update mcp log ([9aa03c8](https://github.com/TencentCloudBase/CloudBase-AI-ToolKit/commit/9aa03c8e1d41d90846aba144378c381d2d7f81ed))
 * update rules for envId not found ([0bbd874](https://github.com/TencentCloudBase/CloudBase-AI-ToolKit/commit/0bbd87466606c69e48f092870a820cab94f95b8f))
 
-
 ### 新功能
 
 * add rules for cross db query ([de52863](https://github.com/TencentCloudBase/CloudBase-AI-ToolKit/commit/de52863f5546f2af667a1477189bcdef7dbb80fe))
@@ -202,16 +246,13 @@ All notable changes to this project will be documented in this file. Follow the 
 
 ## [1.5.0](https://github.com/TencentCloudBase/CloudBase-AI-ToolKit/compare/v1.4.0...v1.5.0) (2025-06-04)
 
-
 ### 修复
 
 * function install Deps ([fffd16a](https://github.com/TencentCloudBase/CloudBase-AI-ToolKit/commit/fffd16a120642d35dd115539301c05b12ffdbf9e))
 
-
 ### 新功能
 
 * 支持文心快码 Comate ([1df3806](https://github.com/TencentCloudBase/CloudBase-AI-ToolKit/commit/1df38060221373fdd41f817c3bffe11412ac4ebd))
-
 
 ### 其他
 
@@ -221,13 +262,11 @@ All notable changes to this project will be documented in this file. Follow the 
 
 ## [1.4.0](https://github.com/TencentCloudBase/CloudBase-AI-ToolKit/compare/v1.1.0...v1.4.0) (2025-05-30)
 
-
 ### 其他
 
 * fix docs ([9b998fe](https://github.com/TencentCloudBase/CloudBase-AI-ToolKit/commit/9b998fed7abfb0b8a9eccf8350c03bbfa2ca7d7a))
 * update doc ([af460bd](https://github.com/TencentCloudBase/CloudBase-AI-ToolKit/commit/af460bdf2d29c65c8f9ba661cf591c3e2e4cbdd2))
 * update download link ([718a065](https://github.com/TencentCloudBase/CloudBase-AI-ToolKit/commit/718a065c055940bd3ee85f1e0afb8819afece901))
-
 
 ### 新功能
 
@@ -239,7 +278,6 @@ All notable changes to this project will be documented in this file. Follow the 
 
 ## 1.3.0 (2025-05-28)
 
-
 ### 新功能
 
 * 优化小程序规则 ([b3d8873](https://github.com/TencentCloudBase/CloudBase-AI-ToolKit/commit/b3d8873ba2c6540f65f9fdf5ff8b088214743e0d))
@@ -248,13 +286,11 @@ All notable changes to this project will be documented in this file. Follow the 
 * support web auth ([375c70e](https://github.com/TencentCloudBase/CloudBase-AI-ToolKit/commit/375c70ec4d665cf32e4273cbc930d3f84e05dbec))
 * update config,support web auth ([870f3d4](https://github.com/TencentCloudBase/CloudBase-AI-ToolKit/commit/870f3d4c363970646b0e823587185cefea83bfbc))
 
-
 ### 修复
 
 * **mcp:** 修复 logout 出参的问题 ([3a4e0a4](https://github.com/TencentCloudBase/CloudBase-AI-ToolKit/commit/3a4e0a446e73259fc167c82468f0a096bdad235b))
 * update function deploy rules ([2892b07](https://github.com/TencentCloudBase/CloudBase-AI-ToolKit/commit/2892b07ddf07fe081ea5c6fe1db5b01c32962722))
 * windsurf error ([500dfd7](https://github.com/TencentCloudBase/CloudBase-AI-ToolKit/commit/500dfd7556dca558ec42d58e38bfdfdaee0bd96b))
-
 
 ### 其他
 

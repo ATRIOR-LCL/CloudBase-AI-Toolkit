@@ -103,7 +103,10 @@ async function resolvePackageMeta(requested) {
   log("resolve", metaUrl);
 
   let lastError;
-  for (let attempt = 1; attempt <= 8; attempt++) {
+  // npm registry propagation after a fresh publish can take minutes; a short
+  // retry window causes false post-publish-smoke failures (v2.33.2 incident).
+  // 12 attempts with exponential backoff (capped 30s) ≈ 4.5 min total.
+  for (let attempt = 1; attempt <= 12; attempt++) {
     try {
       const meta = await fetchJson(metaUrl);
       assert(meta?.version, `Registry response missing version for ${requested}`);
@@ -117,8 +120,8 @@ async function resolvePackageMeta(requested) {
       };
     } catch (error) {
       lastError = error;
-      const delayMs = Math.min(15000, 1000 * attempt);
-      log("resolve-retry", `attempt ${attempt}/8 failed (${error.message}); wait ${delayMs}ms`);
+      const delayMs = Math.min(30000, 2000 * 2 ** (attempt - 1));
+      log("resolve-retry", `attempt ${attempt}/12 failed (${error.message}); wait ${delayMs}ms`);
       await new Promise((resolve) => setTimeout(resolve, delayMs));
     }
   }
@@ -357,6 +360,25 @@ async function main() {
     const pkgJson = JSON.parse(readFileSync(path.join(pkgRoot, "package.json"), "utf8"));
     assert(pkgJson.version === meta.version, `package.json version ${pkgJson.version} != ${meta.version}`);
     log("package.json", `version=${pkgJson.version}`);
+
+    // server.json ships inside the tarball (see package.json "files"); its
+    // version must match the published version, otherwise the MCP Registry
+    // and other consumers reading the tarball see a stale version.
+    const serverJsonPath = path.join(pkgRoot, "server.json");
+    assert(existsSync(serverJsonPath), `Published tarball missing server.json at ${serverJsonPath}`);
+    const serverJson = JSON.parse(readFileSync(serverJsonPath, "utf8"));
+    assert(
+      serverJson.version === meta.version,
+      `server.json version ${serverJson.version} != published version ${meta.version}`,
+    );
+    const npmServerPkg = (serverJson.packages || []).find((p) => p.registryType === "npm");
+    if (npmServerPkg) {
+      assert(
+        npmServerPkg.version === meta.version,
+        `server.json npm package version ${npmServerPkg.version} != published version ${meta.version}`,
+      );
+    }
+    log("server.json", `version=${serverJson.version}`);
 
     assertOpaStrings(pkgRoot);
     const { toolNames } = await assertToolRegistration(pkgRoot);

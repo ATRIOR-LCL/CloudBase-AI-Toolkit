@@ -119,6 +119,8 @@ When your IDE does not support native MCP or Plugin install, use **mcporter** as
   `npx mcporter call cloudbase.auth action=status --output json`
 - Start device-flow login:
   `npx mcporter call cloudbase.auth action=start_auth authMode=device --output json`
+- Start device-flow login on the international site (国际站环境必须显式传 `site=intl`，否则会走国内站链路):
+  `npx mcporter call cloudbase.auth action=start_auth authMode=device site=intl --output json`
 - Resolve env alias to full EnvId:
   `npx mcporter call cloudbase.envQuery action=list alias=demo aliasExact=true fields='["EnvId","Alias","Status","IsDefault"]' --output json`
 - Bind environment after login:
@@ -149,7 +151,7 @@ Query available plans, create environments, change plans, and renew:
   ```
 
   Resources parameter values: `flexdb` (document database), `storage` (cloud storage), `function` (cloud functions), `postgresql` (PostgreSQL database).
-  Do **not** pass `region`: CreateEnv does not accept Region; environment region is determined by account/package.
+  Optional `region` (e.g. `region=ap-guangzhou`) selects where the environment is created: it is sent as the **`X-TC-Region` request context** (same as CLI `tcb env create --region ap-guangzhou`), never as a CreateEnv body field. Omit it to use the current session region. If you pass `region`, repeat the same value on the confirming call (`confirm=yes`), otherwise the environment may be created in the session region instead.
 
 - **Change plan** (e.g. upgrade to standard):
   `npx mcporter call cloudbase.manageEnv action=modifyPlan envId=<envId> packageId=baas_pf_standard confirm=yes --output json`

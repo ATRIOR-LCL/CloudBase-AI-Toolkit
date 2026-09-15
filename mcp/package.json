@@ -1,6 +1,6 @@
 {
   "name": "@cloudbase/cloudbase-mcp",
-  "version": "2.33.0",
+  "version": "2.34.3",
   "mcpName": "io.github.TencentCloudBase/cloudbase-mcp",
   "packageManager": "pnpm@10.8.0",
   "description": "CloudBase MCP Server \u2014 operate Tencent CloudBase (database, auth, functions, storage, hosting) from AI coding tools via the Model Context Protocol. Part of CloudBase AI Toolkit.",
@@ -51,7 +51,9 @@
     "test:pg:cloud": "npm run build && node ./scripts/verify-pg-cloud-smoke.mjs",
     "test:cli:cloud-mode": "node ./scripts/verify-cli-cloud-mode-smoke.mjs",
     "test:npm:tarball-smoke": "node ./scripts/verify-npm-tarball-smoke.mjs",
-    "test:inspector": "npm run build && npx @modelcontextprotocol/inspector node ./dist/cli.js",
+    "check:i18n": "node ./scripts/check-i18n-coverage.mjs",
+    "update:i18n-baseline": "node ./scripts/check-i18n-coverage.mjs --update",
+    "test:inspector": "npm run build && npx @modelcontextprotocol/inspector node ./dist/cli.cjs",
     "prepublishOnly": "npm run build && node scripts/prepare-publish.cjs",
     "postpublish": "node scripts/restore-deps.cjs"
   },
@@ -71,7 +73,7 @@
   "dependencies": {
     "@cloudbase/cals": "^1.2.23",
     "@cloudbase/functions-framework": "^1.14.0",
-    "@cloudbase/manager-node": "5.8.3",
+    "@cloudbase/manager-node": "5.8.6",
     "@cloudbase/mcp": "1.0.0-beta.25",
     "@cloudbase/toolbox": "^0.8.4",
     "@modelcontextprotocol/sdk": "1.30.0",

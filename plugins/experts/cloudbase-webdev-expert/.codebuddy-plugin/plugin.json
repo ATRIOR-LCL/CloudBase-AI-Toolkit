@@ -1,6 +1,6 @@
 {
   "name": "cloudbase-webdev-expert",
-  "version": "1.0.0",
+  "version": "1.0.3",
   "description": "CloudBase Web application expert: builds and deploys full-stack web apps — frontend hosting, PostgreSQL, RLS row-level security, cloud functions, and AI/LLM integration — for non-developers building internal tools and teams shipping SaaS MVPs.",
   "author": {
     "name": "booker",
@@ -10,10 +10,8 @@
     "./agents/cloudbase-webdev-expert.md"
   ],
   "skills": [],
-
   "expertType": "agent",
   "agentName": "cloudbase-webdev-expert",
-
   "displayName": {
     "en": "CloudBase Business System Expert",
     "zh": "云开发业务系统专家"
@@ -34,9 +32,18 @@
   },
   "plugin": "cloudbase-webdev-expert",
   "tags": [
-    { "en": "Web Apps", "zh": "网页应用" },
-    { "en": "Business Systems", "zh": "业务系统" },
-    { "en": "SaaS", "zh": "SaaS" }
+    {
+      "en": "Web Apps",
+      "zh": "网页应用"
+    },
+    {
+      "en": "Business Systems",
+      "zh": "业务系统"
+    },
+    {
+      "en": "SaaS",
+      "zh": "SaaS"
+    }
   ],
   "quickPrompts": [
     {

@@ -5,7 +5,7 @@
   "tools": [
     {
       "name": "auth",
-      "description": "CloudBase（腾讯云开发）开发阶段登录与环境绑定。登录后即可访问云资源；环境(env)是云函数、数据库、静态托管等资源的隔离单元，绑定环境后其他 MCP 工具才能操作该环境。支持：查询状态、发起登录、API Key登录、绑定环境(set_env)、退出登录。auth(status) 会返回 credential_scope（account=账号级 / single_env=环境级 API Key）与当前 region；环境级 API Key 只能看到绑定的 envId，查不到其他地域环境是权限边界而非环境不存在。",
+      "description": "CloudBase（腾讯云开发）开发阶段登录与环境绑定。登录后即可访问云资源；环境(env)是云函数、数据库、静态托管等资源的隔离单元，绑定环境后其他 MCP 工具才能操作该环境。支持：查询状态、发起登录、API Key登录、绑定环境(set_env)、退出登录。auth(status) 会返回 credential_scope（account=账号级 / single_env=环境级 API Key）与当前 region；环境级 API Key 只能看到绑定的 envId，查不到其他地域环境是权限边界而非环境不存在。可选 site/region/lang 参数：site=站点(domestic/intl)，region=地域，lang=输出语言(zh/en)。",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -39,11 +39,31 @@
           },
           "oauthCustom": {
             "type": "boolean",
-            "description": "高级可选：自定义 endpoint 返回格式开关。未配置 endpoint 时默认 false；配置 endpoint 后默认 true，且不能设为 false"
+            "description": "高级可选：自定义 endpoint 返回格式开关。未配置 endpoint 时默认 false；配置 endpoint 后默认 true。标准 {code,result} 包装格式的端点（如国际站 tcb-api.tencentcloud.com）应显式传 false"
+          },
+          "site": {
+            "type": "string",
+            "enum": [
+              "domestic",
+              "intl"
+            ],
+            "description": "站点：domestic=国内站，intl=国际站。环境开通在腾讯云国际站时，登录（start_auth/login_by_api_key）需显式传 intl，否则会走国内站链路、看不到国际站环境；调用级显式传入优先于 TCB_SITE 环境变量 / region 映射表 / 项目配置，影响登录端点、授权页与 API Key 换取网关"
           },
           "envId": {
             "type": "string",
             "description": "环境ID(CloudBase 环境唯一标识)，绑定后工具将操作该环境。action=set_env 时必填"
+          },
+          "region": {
+            "type": "string",
+            "description": "地域（如 ap-shanghai / ap-guangzhou / ap-singapore）。用于 region→site 推断与 API Key 换取网关选择；显式 site 优先"
+          },
+          "lang": {
+            "type": "string",
+            "enum": [
+              "zh",
+              "en"
+            ],
+            "description": "输出语言：zh=中文（默认），en=英文。覆盖实例级语言（createCloudBaseMcpServer lang 选项 / TCB_LANG / project.json）"
           },
           "apiKey": {
             "type": "string",
@@ -69,7 +89,7 @@
     },
     {
       "name": "queryEnv",
-      "description": "查询 CloudBase 环境相关信息，支持查询环境列表、指定环境详情、安全域名、资源用量与监控指标。（曾用名：envQuery、listEnvs、getEnvInfo、getEnvAuthDomains）当 action=list 时，会按 DescribeEnvs 语义做列表/筛选，标准返回字段为 EnvId、Alias、Status、EnvType、Region、PackageId、PackageName、IsDefault，并支持通过 fields 白名单裁剪这些字段；aliasExact=true 时会按别名精确筛选，避免把前缀相近的环境误当作候选；即使传入 envId，action=list 也只返回摘要，不会返回完整资源明细或 expiry。账号级登录可传 region（ap-shanghai/ap-guangzhou/ap-singapore）查询对应地域，对齐 CLI `tcb env list -r <region>`；环境级 API Key 只能看到绑定的 envId，返回 credential_scope=single_env，不要误判为环境不存在。如需查询某个已知 EnvId 对应环境的详细信息（包括资源字段和计费信息），必须使用 action=info 并传入目标环境的 envId 参数。action=info 会在可用时补充 BillingInfo（如 ExpireTime、PayMode、IsAutoRenew 等计费字段）。\n\n📊 action=usage 对齐 tcb env usage/info：透传 Manager SDK describeEnvAccountCircle + describeCreditsUsageDetail，返回计费周期与各模块资源点用量（FLEXDB/SCF/COS 等）。envId 必填；type 可选过滤模块；未传 startDate/endDate 时自动使用当前计费周期。\n\n📈 action=metrics 对齐 TCB DescribeCurveData（manager.monitor.describeCurveData，不是云监控 GetMonitorData）：查询环境/网关 QPS、云函数调用与错误、数据库 CPU/内存/磁盘、云托管 CPU/QPS 等时序。envId 与 metricName 必填；startTime/endTime 格式 YYYY-MM-DD HH:mm:ss，须成对传入，不传则默认最近 24 小时；period 仅 300/3600/86400。GatewayTraceEnvQPS 未传 resourceID 时自动填环境级 all|:|all|:|all|:|all；云托管 Tke* 指标必须传服务名 resourceID。禁止用 callCloudApi 猜测监控 Action。\n\n🔍 action=info 还会派生三个用于后端选型的字段：\n- `EnvInfo.RuntimeMode`：'postgresql' 或 'nosql'，表示新业务建议默认使用的后端（PG 已开通时为 postgresql，否则为 nosql）。\n- `EnvInfo.RuntimeBackends`：`{postgresql, nosql, mysql}` 三个布尔值，描述当前环境实际并存的后端。\n- `EnvInfo.RuntimeModeHints`：每个后端对应的 API/工具/skill 提示。\n\n🌐 action=info 还会在不改写 `StaticStorages[].StaticDomain`（云 API 名义域名）的前提下，投影网关路由 Enable 状态：`StaticStorages[].staticDomainRouteEnabled` 与 `EnvInfo.staticDomainRouteEnabled`（与 queryHosting websiteConfig 同源）。`false` 表示默认静态域名根路由已禁用（访问会返回 GATEWAY_ROUTE_DISABLED），勿把名义域名当成可达 URL。\n\nAI 在写业务/权限/存储代码前必须先看这三项：PG 模式下新业务推荐 `app.rdb()` + RLS（`managePgDatabase action=execute` 跑 `CREATE POLICY`）+ pgstore；已存在的 NoSQL 集合 / 旧 storage / `managePermissions(resourceType=\"noSqlDatabase\")` 在 PG 环境下仍然有效。真正不适用的是 MySQL：当 `RuntimeBackends.mysql === false` 时，`manageMysqlDatabase` / `queryMysqlDatabase` / `relational-database-mcp-cloudbase` skill 都不该使用。",
+      "description": "查询 CloudBase 环境相关信息，支持查询环境列表、指定环境详情、安全域名、资源用量与监控指标。（曾用名：envQuery、listEnvs、getEnvInfo、getEnvAuthDomains）当 action=list 时，会按 DescribeEnvs 语义做列表/筛选，标准返回字段为 EnvId、Alias、Status、EnvType、Region、PackageId、PackageName、IsDefault，并支持通过 fields 白名单裁剪这些字段；aliasExact=true 时会按别名精确筛选，避免把前缀相近的环境误当作候选；即使传入 envId，action=list 也只返回摘要，不会返回完整资源明细或 expiry。账号级登录可传 region（ap-shanghai/ap-guangzhou/ap-singapore）查询对应地域，对齐 CLI `tcb env list -r <region>`；环境级凭证（API Key / 托管授权 token）只能看到绑定的 envId，返回 credential_scope=single_env，此时 region 不参与查询会在 ignored_params 中如实说明（AppliedFilters.region 为 null），不要误判为环境不存在或地域过滤失效。如需查询某个已知 EnvId 对应环境的详细信息（包括资源字段和计费信息），必须使用 action=info 并传入目标环境的 envId 参数。action=info 会在可用时补充 BillingInfo（如 ExpireTime、PayMode、IsAutoRenew 等计费字段）。\n\n📊 action=usage 对齐 tcb env usage/info：透传 Manager SDK describeEnvAccountCircle + describeCreditsUsageDetail，返回计费周期与各模块资源点用量（FLEXDB/SCF/COS 等）。envId 必填；type 可选过滤模块；未传 startDate/endDate 时自动使用当前计费周期。\n\n📈 action=metrics 对齐 TCB DescribeCurveData（manager.monitor.describeCurveData，不是云监控 GetMonitorData）：查询环境/网关 QPS、云函数调用与错误、数据库 CPU/内存/磁盘、云托管 CPU/QPS 等时序。envId 与 metricName 必填；startTime/endTime 格式 YYYY-MM-DD HH:mm:ss，须成对传入，不传则默认最近 24 小时；period 仅 300/3600/86400。GatewayTraceEnvQPS 未传 resourceID 时自动填环境级 all|:|all|:|all|:|all；云托管 Tke* 指标必须传服务名 resourceID。禁止用 callCloudApi 猜测监控 Action。\n\n🔍 action=info 还会派生三个用于后端选型的字段：\n- `EnvInfo.RuntimeMode`：'postgresql' 或 'nosql'，表示新业务建议默认使用的后端（PG 已开通时为 postgresql，否则为 nosql）。\n- `EnvInfo.RuntimeBackends`：`{postgresql, nosql, mysql}` 三个布尔值，描述当前环境实际并存的后端。\n- `EnvInfo.RuntimeModeHints`：每个后端对应的 API/工具/skill 提示。\n\n🌐 action=info 还会在不改写 `StaticStorages[].StaticDomain`（云 API 名义域名）的前提下，投影网关路由 Enable 状态：`StaticStorages[].staticDomainRouteEnabled` 与 `EnvInfo.staticDomainRouteEnabled`（与 queryHosting websiteConfig 同源）。`false` 表示默认静态域名根路由已禁用（访问会返回 GATEWAY_ROUTE_DISABLED），勿把名义域名当成可达 URL。\n\nAI 在写业务/权限/存储代码前必须先看这三项：PG 模式下新业务推荐 `app.rdb()` + RLS（`managePgDatabase action=execute` 跑 `CREATE POLICY`）+ pgstore；已存在的 NoSQL 集合 / 旧 storage / `managePermissions(resourceType=\"noSqlDatabase\")` 在 PG 环境下仍然有效。真正不适用的是 MySQL：当 `RuntimeBackends.mysql === false` 时，`manageMysqlDatabase` / `queryMysqlDatabase` / `relational-database-mcp-cloudbase` skill 都不该使用。",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -94,7 +114,7 @@
           },
           "envId": {
             "type": "string",
-            "description": "环境 ID。action=list 时可选（仅按 DescribeEnvs 语义做筛选，仍返回摘要）；action=info / action=usage / action=metrics 时必填。"
+            "description": "环境 ID。action=list 时可选（仅按 DescribeEnvs 语义做筛选，仍返回摘要）；action=info / action=usage / action=metrics 时必填；action=domains 时可选（不传则查当前绑定环境，传了则查该环境的安全域名）。"
           },
           "region": {
             "type": "string",
@@ -103,7 +123,7 @@
               "ap-guangzhou",
               "ap-singapore"
             ],
-            "description": "查询地域。仅 action=list 时有效。账号级凭据会把该值透传到 DescribeEnvs（X-TC-Region），例如 ap-singapore。环境级 API Key 无法用此参数看到其他环境。等价 CLI：tcb env list -r <region> --json。"
+            "description": "查询地域。仅 action=list 时有效。账号级凭据会把该值透传到 DescribeEnvs（X-TC-Region），例如 ap-singapore。等价 CLI：tcb env list -r <region> --json。环境级凭据（API Key / 托管授权 token）为单环境权限，该参数会被忽略：结果恒为绑定环境，响应的 AppliedFilters.region 为 null、query_region 取该环境自身的 Region、ignored_params 说明忽略原因——不要据此判定该地域没有环境。⚠️ ap-singapore 同时属于国内站与国际站，未显式指定站点时会被判定为国际站（site=intl）：若两站都登录过，传该地域会静默查国际站账号，请先用 auth(site=\"domestic\") 或设置 TCB_SITE=domestic 明确站点。"
           },
           "limit": {
             "type": "integer",
@@ -229,7 +249,7 @@
     },
     {
       "name": "envQuery",
-      "description": "查询 CloudBase 环境相关信息，支持查询环境列表、指定环境详情、安全域名、资源用量与监控指标。（曾用名：envQuery、listEnvs、getEnvInfo、getEnvAuthDomains）当 action=list 时，会按 DescribeEnvs 语义做列表/筛选，标准返回字段为 EnvId、Alias、Status、EnvType、Region、PackageId、PackageName、IsDefault，并支持通过 fields 白名单裁剪这些字段；aliasExact=true 时会按别名精确筛选，避免把前缀相近的环境误当作候选；即使传入 envId，action=list 也只返回摘要，不会返回完整资源明细或 expiry。账号级登录可传 region（ap-shanghai/ap-guangzhou/ap-singapore）查询对应地域，对齐 CLI `tcb env list -r <region>`；环境级 API Key 只能看到绑定的 envId，返回 credential_scope=single_env，不要误判为环境不存在。如需查询某个已知 EnvId 对应环境的详细信息（包括资源字段和计费信息），必须使用 action=info 并传入目标环境的 envId 参数。action=info 会在可用时补充 BillingInfo（如 ExpireTime、PayMode、IsAutoRenew 等计费字段）。\n\n📊 action=usage 对齐 tcb env usage/info：透传 Manager SDK describeEnvAccountCircle + describeCreditsUsageDetail，返回计费周期与各模块资源点用量（FLEXDB/SCF/COS 等）。envId 必填；type 可选过滤模块；未传 startDate/endDate 时自动使用当前计费周期。\n\n📈 action=metrics 对齐 TCB DescribeCurveData（manager.monitor.describeCurveData，不是云监控 GetMonitorData）：查询环境/网关 QPS、云函数调用与错误、数据库 CPU/内存/磁盘、云托管 CPU/QPS 等时序。envId 与 metricName 必填；startTime/endTime 格式 YYYY-MM-DD HH:mm:ss，须成对传入，不传则默认最近 24 小时；period 仅 300/3600/86400。GatewayTraceEnvQPS 未传 resourceID 时自动填环境级 all|:|all|:|all|:|all；云托管 Tke* 指标必须传服务名 resourceID。禁止用 callCloudApi 猜测监控 Action。\n\n🔍 action=info 还会派生三个用于后端选型的字段：\n- `EnvInfo.RuntimeMode`：'postgresql' 或 'nosql'，表示新业务建议默认使用的后端（PG 已开通时为 postgresql，否则为 nosql）。\n- `EnvInfo.RuntimeBackends`：`{postgresql, nosql, mysql}` 三个布尔值，描述当前环境实际并存的后端。\n- `EnvInfo.RuntimeModeHints`：每个后端对应的 API/工具/skill 提示。\n\n🌐 action=info 还会在不改写 `StaticStorages[].StaticDomain`（云 API 名义域名）的前提下，投影网关路由 Enable 状态：`StaticStorages[].staticDomainRouteEnabled` 与 `EnvInfo.staticDomainRouteEnabled`（与 queryHosting websiteConfig 同源）。`false` 表示默认静态域名根路由已禁用（访问会返回 GATEWAY_ROUTE_DISABLED），勿把名义域名当成可达 URL。\n\nAI 在写业务/权限/存储代码前必须先看这三项：PG 模式下新业务推荐 `app.rdb()` + RLS（`managePgDatabase action=execute` 跑 `CREATE POLICY`）+ pgstore；已存在的 NoSQL 集合 / 旧 storage / `managePermissions(resourceType=\"noSqlDatabase\")` 在 PG 环境下仍然有效。真正不适用的是 MySQL：当 `RuntimeBackends.mysql === false` 时，`manageMysqlDatabase` / `queryMysqlDatabase` / `relational-database-mcp-cloudbase` skill 都不该使用。",
+      "description": "查询 CloudBase 环境相关信息，支持查询环境列表、指定环境详情、安全域名、资源用量与监控指标。（曾用名：envQuery、listEnvs、getEnvInfo、getEnvAuthDomains）当 action=list 时，会按 DescribeEnvs 语义做列表/筛选，标准返回字段为 EnvId、Alias、Status、EnvType、Region、PackageId、PackageName、IsDefault，并支持通过 fields 白名单裁剪这些字段；aliasExact=true 时会按别名精确筛选，避免把前缀相近的环境误当作候选；即使传入 envId，action=list 也只返回摘要，不会返回完整资源明细或 expiry。账号级登录可传 region（ap-shanghai/ap-guangzhou/ap-singapore）查询对应地域，对齐 CLI `tcb env list -r <region>`；环境级凭证（API Key / 托管授权 token）只能看到绑定的 envId，返回 credential_scope=single_env，此时 region 不参与查询会在 ignored_params 中如实说明（AppliedFilters.region 为 null），不要误判为环境不存在或地域过滤失效。如需查询某个已知 EnvId 对应环境的详细信息（包括资源字段和计费信息），必须使用 action=info 并传入目标环境的 envId 参数。action=info 会在可用时补充 BillingInfo（如 ExpireTime、PayMode、IsAutoRenew 等计费字段）。\n\n📊 action=usage 对齐 tcb env usage/info：透传 Manager SDK describeEnvAccountCircle + describeCreditsUsageDetail，返回计费周期与各模块资源点用量（FLEXDB/SCF/COS 等）。envId 必填；type 可选过滤模块；未传 startDate/endDate 时自动使用当前计费周期。\n\n📈 action=metrics 对齐 TCB DescribeCurveData（manager.monitor.describeCurveData，不是云监控 GetMonitorData）：查询环境/网关 QPS、云函数调用与错误、数据库 CPU/内存/磁盘、云托管 CPU/QPS 等时序。envId 与 metricName 必填；startTime/endTime 格式 YYYY-MM-DD HH:mm:ss，须成对传入，不传则默认最近 24 小时；period 仅 300/3600/86400。GatewayTraceEnvQPS 未传 resourceID 时自动填环境级 all|:|all|:|all|:|all；云托管 Tke* 指标必须传服务名 resourceID。禁止用 callCloudApi 猜测监控 Action。\n\n🔍 action=info 还会派生三个用于后端选型的字段：\n- `EnvInfo.RuntimeMode`：'postgresql' 或 'nosql'，表示新业务建议默认使用的后端（PG 已开通时为 postgresql，否则为 nosql）。\n- `EnvInfo.RuntimeBackends`：`{postgresql, nosql, mysql}` 三个布尔值，描述当前环境实际并存的后端。\n- `EnvInfo.RuntimeModeHints`：每个后端对应的 API/工具/skill 提示。\n\n🌐 action=info 还会在不改写 `StaticStorages[].StaticDomain`（云 API 名义域名）的前提下，投影网关路由 Enable 状态：`StaticStorages[].staticDomainRouteEnabled` 与 `EnvInfo.staticDomainRouteEnabled`（与 queryHosting websiteConfig 同源）。`false` 表示默认静态域名根路由已禁用（访问会返回 GATEWAY_ROUTE_DISABLED），勿把名义域名当成可达 URL。\n\nAI 在写业务/权限/存储代码前必须先看这三项：PG 模式下新业务推荐 `app.rdb()` + RLS（`managePgDatabase action=execute` 跑 `CREATE POLICY`）+ pgstore；已存在的 NoSQL 集合 / 旧 storage / `managePermissions(resourceType=\"noSqlDatabase\")` 在 PG 环境下仍然有效。真正不适用的是 MySQL：当 `RuntimeBackends.mysql === false` 时，`manageMysqlDatabase` / `queryMysqlDatabase` / `relational-database-mcp-cloudbase` skill 都不该使用。\n\n⚠️ DEPRECATED：此工具名已废弃，是 queryEnv 的旧词序别名，入参与 action 完全一致。请直接调用 queryEnv；本别名将在下个版本移除。",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -254,7 +274,7 @@
           },
           "envId": {
             "type": "string",
-            "description": "环境 ID。action=list 时可选（仅按 DescribeEnvs 语义做筛选，仍返回摘要）；action=info / action=usage / action=metrics 时必填。"
+            "description": "环境 ID。action=list 时可选（仅按 DescribeEnvs 语义做筛选，仍返回摘要）；action=info / action=usage / action=metrics 时必填；action=domains 时可选（不传则查当前绑定环境，传了则查该环境的安全域名）。"
           },
           "region": {
             "type": "string",
@@ -263,7 +283,7 @@
               "ap-guangzhou",
               "ap-singapore"
             ],
-            "description": "查询地域。仅 action=list 时有效。账号级凭据会把该值透传到 DescribeEnvs（X-TC-Region），例如 ap-singapore。环境级 API Key 无法用此参数看到其他环境。等价 CLI：tcb env list -r <region> --json。"
+            "description": "查询地域。仅 action=list 时有效。账号级凭据会把该值透传到 DescribeEnvs（X-TC-Region），例如 ap-singapore。等价 CLI：tcb env list -r <region> --json。环境级凭据（API Key / 托管授权 token）为单环境权限，该参数会被忽略：结果恒为绑定环境，响应的 AppliedFilters.region 为 null、query_region 取该环境自身的 Region、ignored_params 说明忽略原因——不要据此判定该地域没有环境。⚠️ ap-singapore 同时属于国内站与国际站，未显式指定站点时会被判定为国际站（site=intl）：若两站都登录过，传该地域会静默查国际站账号，请先用 auth(site=\"domestic\") 或设置 TCB_SITE=domestic 明确站点。"
           },
           "limit": {
             "type": "integer",
@@ -389,7 +409,7 @@
     },
     {
       "name": "envDomainManagement",
-      "description": "管理 CloudBase 环境的安全域名（安全域名 / CORS 白名单），支持添加和删除操作。（原工具名：createEnvDomain/deleteEnvDomain，为兼容旧AI规则可继续使用这些名称）当浏览器 Web 应用需要从本地 Vite / dev server 直接访问 CloudBase 资源时，应先用 queryEnv(action=domains) 检查当前实际浏览器 origin 对应的 host:port 是否已在白名单中，再按该实际值添加。新增或删除后请每约 10 秒轮询 queryEnv(action=domains) 确认状态收敛，勿一次 sleep 满 10 分钟；多数环境数分钟内可收敛。⚠️ 重要：此工具仅用于 CORS/请求来源验证，不涉及 SSL 证书。自定义域名公网 HTTPS：先 queryGateway(listCustomDomains)；已有域名则 manageGateway(createRoute) 显式传 domain（无需证书）；仅首次绑定新域名才用 bindCustomDomain（需 certificateId）。",
+      "description": "⚠️ DEPRECATED：此工具已废弃并收编进 manageEnv，请改用 manageEnv(action=\"addSecurityDomain\") / manageEnv(action=\"removeSecurityDomain\")（入参 domains 完全一致）。本别名将在下个版本移除。\n\n管理【环境安全域名】＝浏览器跨域（CORS）白名单：控制允许哪些网页 origin（host:port）从浏览器直接调用本环境的 CloudBase 资源。只做 CORS 来源验证，不提供访问域名，不涉及 HTTPS 证书。⚠️ 与【网关自定义域名】是两套完全独立的配置，互不相干：如需给自己的域名绑定 HTTPS 访问入口（云托管 / 网关服务），那属于 manageGateway 的职责——先 queryGateway(listCustomDomains)；已有域名则 manageGateway(createRoute) 显式传 domain（无需证书）；仅首次绑定新域名才用 bindCustomDomain（需 certificateId）。不要用本工具做这件事。\n\n操作指引：（原工具名 createEnvDomain/deleteEnvDomain，为兼容旧 AI 规则可继续使用这些名称）当浏览器 Web 应用需要从本地 Vite / dev server 直接访问 CloudBase 资源时，先用 queryEnv(action=domains) 检查当前实际浏览器 origin 对应的 host:port 是否已在白名单中，再按该实际值添加。新增或删除后请每约 10 秒轮询 queryEnv(action=domains) 确认状态收敛，勿一次 sleep 满 10 分钟；多数环境数分钟内可收敛。",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -419,7 +439,7 @@
     },
     {
       "name": "manageEnv",
-      "description": "管理 CloudBase 环境，支持：listPackages=查询可选套餐列表，create=创建新环境（需确认），modifyPlan=变更套餐（升降配，需确认），renew=续费环境（需确认）。\n\n⚠️ 所有涉及费用的操作（create/modifyPlan/renew），执行前必须展示配置摘要并等待用户通过 confirm=\"yes\" 确认。",
+      "description": "管理 CloudBase 环境，支持：listPackages=查询可选套餐列表，create=创建新环境（需确认），modifyPlan=变更套餐（升降配，需确认），renew=续费环境（需确认），addSecurityDomain=添加环境安全域名（浏览器 CORS 白名单，不计费、无需确认），removeSecurityDomain=删除环境安全域名（不计费、无需确认）。\n\n⚠️ 涉及费用的操作（create/modifyPlan/renew），执行前必须展示配置摘要并等待用户通过 confirm=\"yes\" 确认；安全域名操作（addSecurityDomain/removeSecurityDomain）不计费，无需 confirm。\n\nℹ️ 安全域名＝浏览器跨域（CORS）白名单，控制允许哪些网页 origin（host:port）从浏览器直接调用本环境的 CloudBase 资源，不提供访问域名、不涉及 HTTPS 证书。给自己的域名绑定 HTTPS 访问入口（云托管/网关服务）属于 manageGateway（listCustomDomains/bindCustomDomain）的职责，与本工具无关。",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -429,9 +449,18 @@
               "listPackages",
               "create",
               "modifyPlan",
-              "renew"
+              "renew",
+              "addSecurityDomain",
+              "removeSecurityDomain"
             ],
-            "description": "操作类型：listPackages=查询可选套餐，create=创建环境，modifyPlan=变更套餐，renew=续费"
+            "description": "操作类型：listPackages=查询可选套餐，create=创建环境，modifyPlan=变更套餐，renew=续费，addSecurityDomain=添加安全域名（CORS 白名单条目），removeSecurityDomain=删除安全域名"
+          },
+          "domains": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "安全域名数组（格式：host:port，例如 localhost:5173 或 127.0.0.1:4173）。仅 action=addSecurityDomain/removeSecurityDomain 时有效且必填。注意：这是 CORS 白名单条目，不是自定义域名，不需要证书。添加前应先用 queryEnv(action=domains) 检查浏览器实际 origin 是否已在白名单中。"
           },
           "alias": {
             "type": "string",
@@ -446,19 +475,27 @@
             "items": {
               "type": "string",
               "enum": [
-                "flexdb",
                 "storage",
                 "function",
                 "postgresql"
               ]
             },
-            "description": "启用的资源类型（action=create 时可选）。省略时默认全部四项：flexdb(文档数据库)、storage(存储)、function(云函数)、postgresql(PostgreSQL)。CreateEnv 要求 Resources 非空，MCP 会始终下发该字段。"
+            "description": "启用的资源类型（action=create 时可选）。可选值：storage(存储)、function(云函数)、postgresql(PostgreSQL)，省略时默认全部三项。CreateEnv 要求 Resources 非空，MCP 会始终下发该字段。不再包含 flexdb(文档数据库)：新建环境不会创建 NoSQL 实例，其可用性以 queryEnv(action=\"info\") 返回的 EnvInfo.RuntimeBackends 为准。"
           },
           "duration": {
             "type": "integer",
             "minimum": 1,
             "maximum": 36,
             "description": "购买或续费时长（月），action=create/renew 时可选，默认 1"
+          },
+          "region": {
+            "type": "string",
+            "enum": [
+              "ap-shanghai",
+              "ap-guangzhou",
+              "ap-singapore"
+            ],
+            "description": "创建地域（仅 action=create 时有效）。按 X-TC-Region 语义透传，决定新环境所在地域；等价 CLI：tcb env create --region ap-shanghai。不传则用当前会话地域（cloudBaseOptions.region → TCB_REGION → 项目配置 / rc 绑定 → 站点默认地域：国内站 ap-shanghai、国际站 ap-singapore）。注意：region 不写进 CreateEnv 请求体，而是通过请求层地域上下文生效——这与「请勿把 Region 放进 params」的 callCloudApi 约定一致。⚠️ ap-singapore 同时属于国内站与国际站，未显式指定站点时会被判定为国际站（site=intl）；如需在国内站该地域创建，请先 auth(site=\"domestic\") 或设置 TCB_SITE=domestic。"
           },
           "envId": {
             "type": "string",
@@ -961,7 +998,7 @@
           "migrationVersion": {
             "type": "string",
             "pattern": "^\\d{14}$",
-            "description": "14 位时间戳 YYYYMMDDHHMMSS。plan/apply/detail/repair 必填；fetchMigration 可选（传入则只拉该条，省略则拉全量远端 history）；禁止由服务端静默生成，避免与本地 cloudbase/migrations/<version>_<name>.sql 分叉。"
+            "description": "14 位时间戳 YYYYMMDDHHMMSS。plan/apply/detail/repair 必填；fetchMigration 可选（传入则只拉该条，省略则拉全量远端 history）；禁止由服务端静默生成，避免与本地 cloudbase/migrations/<version>_<name>.sql 分叉。applyMigration 非增量：每次传完整 SQL；终态失败且 listMigrations 未落地时版本号不占用，换新 migrationVersion 重发全量 SQL 即可（同名不同版本不冲突）。"
           },
           "rollbackSql": {
             "type": "string",
@@ -2201,7 +2238,7 @@
     },
     {
       "name": "downloadTemplate",
-      "description": "自动下载并部署CloudBase项目模板。\n**Note**: Call this tool when the user requests to create a new project using a CloudBase template.\n\n支持的模板:\n- react: React + CloudBase 全栈应用模板\n- vue: Vue + CloudBase 全栈应用模板\n- miniprogram: 微信小程序 + 云开发模板  \n- uniapp: UniApp + CloudBase 跨端应用模板\n- rules: 只包含AI编辑器配置文件（包含Cursor、WindSurf、CodeBuddy等所有主流编辑器配置），适合在已有项目中补充AI编辑器配置\n\n支持的IDE类型:\n- all: 下载所有IDE配置\n- cursor: Cursor AI编辑器\n- 其他IDE类型见下方列表\n\n注意：如果未传入 ide 参数且无法从环境变量检测到 IDE，将提示错误并要求传入 ide 参数\n- windsurf: WindSurf AI编辑器\n- codebuddy: CodeBuddy AI编辑器\n- claude-code: Claude Code AI编辑器\n- cline: Cline AI编辑器\n- gemini-cli: Gemini CLI\n- opencode: OpenCode AI编辑器\n- qwen-code: 通义灵码\n- baidu-comate: 百度Comate\n- openai-codex-cli: OpenAI Codex CLI\n- augment-code: Augment Code\n- github-copilot: GitHub Copilot\n- roocode: RooCode AI编辑器\n- tongyi-lingma: 通义灵码\n- trae: Trae AI编辑器\n- qoder: Qoder AI编辑器\n- antigravity: Google Antigravity AI编辑器\n- vscode: Visual Studio Code\n- kiro: Kiro AI编辑器\n- aider: Aider AI编辑器\n\n特别说明：\n- rules 模板会自动包含当前 mcp 版本号信息（版本号：2.32.5），便于后续维护和版本追踪\n- 下载 rules 模板时，如果项目中已存在 README.md 文件，系统会自动保护该文件不被覆盖（除非设置 overwrite=true）",
+      "description": "自动下载并部署CloudBase项目模板。\n**Note**: Call this tool when the user requests to create a new project using a CloudBase template.\n\n支持的模板:\n- react: React + CloudBase 全栈应用模板\n- vue: Vue + CloudBase 全栈应用模板\n- miniprogram: 微信小程序 + 云开发模板\n- uniapp: UniApp + CloudBase 跨端应用模板\n- rules: 只包含AI编辑器配置文件（包含Cursor、WindSurf、CodeBuddy等所有主流编辑器配置），适合在已有项目中补充AI编辑器配置\n\n支持的IDE类型:\n- all: 下载所有IDE配置\n- cursor: Cursor AI编辑器\n- 其他IDE类型见下方列表\n\n注意：如果未传入 ide 参数且无法从环境变量检测到 IDE，将提示错误并要求传入 ide 参数\n- windsurf: WindSurf AI编辑器\n- codebuddy: CodeBuddy AI编辑器\n- claude-code: Claude Code AI编辑器\n- cline: Cline AI编辑器\n- gemini-cli: Gemini CLI\n- opencode: OpenCode AI编辑器\n- qwen-code: 通义灵码\n- baidu-comate: 百度Comate\n- openai-codex-cli: OpenAI Codex CLI\n- augment-code: Augment Code\n- github-copilot: GitHub Copilot\n- roocode: RooCode AI编辑器\n- tongyi-lingma: 通义灵码\n- trae: Trae AI编辑器\n- qoder: Qoder AI编辑器\n- antigravity: Google Antigravity AI编辑器\n- vscode: Visual Studio Code\n- kiro: Kiro AI编辑器\n- aider: Aider AI编辑器\n\n特别说明：\n- rules 模板会自动包含当前 MCP 版本号信息，便于后续维护和版本追踪\n- 下载 rules 模板时，如果项目中已存在 README.md 文件，系统会自动保护该文件不被覆盖（除非设置 overwrite=true）",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -2259,7 +2296,7 @@
     },
     {
       "name": "searchKnowledgeBase",
-      "description": "云开发知识库检索工具，支持 CloudBase 官方文档 (docs)、固定技能文档 (skill) 和 OpenAPI 文档 (openapi) 查询。\n\n      按场景选择 mode：\n      - 工具调用报错且错误信息含具体错误码（如 OperationDenied.FreePackageDenied）时：mode=docs + action=searchDocs（query=错误码），先查错误码官方含义与处理指引再行动，不要凭猜测重试\n      - 不确定答案在哪、需要对官方文档做全文检索时：mode=docs + action=searchDocs（传 query 关键词）\n      - 已知文档标题、层级路径或 URL 时：mode=docs + action=findByName（传 input）或 action=readDoc（传 docPath）\n      - 需要某个场景的落地指南 / 最佳实践时：mode=skill + skillName\n      - 需要 HTTP API 的接口定义时：mode=openapi + apiName\n\n      ⚠️ 重要：当 CloudBase skills 处于禁用状态或当前 IDE 不支持 skill 文件读取时，必须使用 searchKnowledgeBase(mode=skill, skillName=...) 来获取 CloudBase 技能文档内容，而不是尝试直接读取 skill 文件。直接读取可能返回 400 错误。示例：\n      - 需要最小 Web+数据库 Demo 路径时：searchKnowledgeBase(mode=skill, skillName=minimal-web-baas-demo)\n      - 需要 auth-tool 指南时：searchKnowledgeBase(mode=skill, skillName=auth-tool)\n      - 需要 auth-web 指南时：searchKnowledgeBase(mode=skill, skillName=auth-web)\n      - 需要 cloudbase-agent 指南时：searchKnowledgeBase(mode=skill, skillName=cloudbase-agent)\n\n      固定技能文档 (skill) 查询当前支持 29 个固定文档，分别是：\n      文档名：skills 文档介绍：Unified CloudBase execution guide for all-in-one skill installs. Use this first for CloudBase app tasks, especially existing apps with TODOs, fixed pages, or active handlers. Routes PostgreSQL / CloudBase PG / app.rdb() / queryPgDatabase / managePgDatabase work away from legacy NoSQL and old auth patterns.\n文档名：ai-model-nodejs 文档介绍：\"Use this skill for Node.js backend AI via @cloudbase/node-sdk (>=3.16.0) — cloud functions, CloudRun, Express/Koa/NestJS, serverless APIs, scheduled jobs, LLM proxies, agent orchestration. The only SDK supporting image generation (ai.createImageModel + generateImage). Text via ai.createModel with groups cloudbase, hunyuan-exp, or custom-*; model ids (e.g. deepseek-v4-flash, glm-5, kimi-k2.6) go in the `model` field of generateText/streamText. MUST run two-step preflight before code — see body. NOT for browser/Web (use ai-model-web) or Mini Program (use ai-model-wechat).\"\n文档名：ai-model-web 文档介绍：\"Use this skill when a browser/Web app (React, Vue, Next, Nuxt, static sites, SPAs, dashboards, AI chat UI, 页面, 前端, 网页) needs AI models via @cloudbase/js-sdk. Default routing for Web/frontend AI — call directly from the browser, do NOT propose a Node.js proxy. Covers generateText and streamText; models via ai.createModel with groups cloudbase, hunyuan-exp, or custom-*, model id in the `model` field. MUST run two-step preflight before code — see body. NOT for Node.js backend (use ai-model-nodejs), Mini Program (use ai-model-wechat), or image generation (Node SDK only).\"\n文档名：ai-model-wechat 文档介绍：\"Use this skill for WeChat Mini Program AI via wx.cloud.extend.AI (小程序, wx.cloud apps). Covers generateText and streamText with callbacks (onText, onEvent, onFinish); streamText needs a data wrapper, generateText returns the raw response. Models via wx.cloud.extend.AI.createModel with groups hunyuan-exp (小程序成长计划), cloudbase (main managed), or custom-*; model id goes in the data wrapper `model` field. MUST run two-step preflight before code — see body. NOT for browser/Web (use ai-model-web), Node.js backend (use ai-model-nodejs), or image generation (use ai-model-nodejs).\"\n文档名：auth-nodejs-cloudbase 文档介绍：CloudBase Node SDK auth guide for server-side identity, user lookup, and custom login tickets. This skill should be used when Node.js code must read caller identity, inspect end users, or bridge an existing user system into CloudBase; not when configuring providers or building client login UI.\n文档名：auth-tool-cloudbase 文档介绍：CloudBase auth provider configuration and login-readiness guide. This skill should be used when users need to inspect, enable, disable, or configure auth providers, publishable-key prerequisites, login methods, SMS/email sender setup, or other provider-side readiness before implementing a client or backend auth flow.\n文档名：auth-web-cloudbase 文档介绍：CloudBase Web Authentication Quick Guide for frontend integration after auth-tool has already been checked. Provides concise and practical Web authentication solutions with multiple login methods and complete user management.\n文档名：auth-wechat-miniprogram 文档介绍：CloudBase WeChat Mini Program native authentication guide. This skill should be used when users need mini program identity handling, OPENID/UNIONID access, or `wx.cloud` auth behavior in projects where login is native and automatic.\n文档名：cloud-functions 文档介绍：CloudBase function runtime guide for building, deploying, and debugging your own Event Functions or HTTP Functions. This skill should be used when users need application runtime code on CloudBase, not when they are merely calling CloudBase official platform APIs.\n文档名：cloud-storage-web 文档介绍：Complete guide for CloudBase cloud storage using Web SDK (@cloudbase/js-sdk) - upload, download, temporary URLs, file management, and best practices.\n文档名：cloudbase-agent 文档介绍：Build and deploy AI agents with CloudBase Agent SDK (TypeScript & Python). Implements the AG-UI protocol for streaming agent-UI communication. Use when deploying agent servers, using LangGraph/LangChain/CrewAI adapters, building custom adapters, understanding AG-UI protocol events, or building web/mini-program UI clients. Supports both TypeScript (@cloudbase/agent-server) and Python (cloudbase-agent-server via FastAPI).\n文档名：cloudbase-cli 文档介绍：CloudBase CLI (tcb, 云开发CLI, Tencent CloudBase命令行) resource management skill. Use when deploying cloud functions, CloudRun, storage, NoSQL/MySQL, static hosting, permissions, CORS/domains via tcb; for CI/CD and batch ops; when the user prefers CLI; or as the first-session fallback when CloudBase MCP tools are not loaded yet (after install/config, before IDE restart). Covers tcb login (device code for Tencent Cloud accounts; --cloudbase-api-key -e for environment API Key without an account; --apiKeyId/--apiKey for CI) and domain commands (fn/hosting/cloudrun/…) as MCP auth/manage parity — do not default to tcb deploy.\n文档名：cloudbase-code-review 文档介绍：\"Code review and validation for CloudBase projects. After writing code for Web / miniprogram / CloudRun / cloud-function projects, call this skill to check for known pitfalls — auth guard misuse, missing database tables, RLS misconfiguration, storage domain setup, and SDK API misuse. Supports automated lint scripts (regex-based) + LLM semantic review.\"\n文档名：cloudbase-document-database-in-wechat-miniprogram 文档介绍：Use CloudBase document database WeChat MiniProgram SDK to query, create, update, and delete data. Supports complex queries, pagination, aggregation, and geolocation queries.\n文档名：cloudbase-document-database-web-sdk 文档介绍：Use CloudBase document database Web SDK only for confirmed NoSQL collection work. Query, create, update, and delete document data; if the task mentions PostgreSQL / CloudBase PG / app.rdb(), route to postgresql-development instead.\n文档名：cloudbase-platform 文档介绍：CloudBase platform overview and routing guide. This skill should be used when users need high-level capability selection, platform concepts, console navigation, or cross-platform best practices before choosing a more specific implementation skill.\n文档名：cloudbase-wechat-integration 文档介绍：CloudBase WeChat integration guide for Mini Program WeChat Pay, Mini Program virtual payment (虚拟支付, wx.requestVirtualPayment), Official Account JSAPI Pay, Native QR-code Pay, Official Account OAuth, openid handling, payment callbacks, and CloudBase Integration Center generated functions. This skill should be used when users ask to add, debug, or extend WeChat payment, virtual payment, or official-account flows on CloudBase.\n文档名：cloudrun-development 文档介绍：CloudBase Run backend development rules (Function mode/Container mode). Use this skill when deploying backend services that require long connections, multi-language support, custom environments, AI agent development, or migrating existing/GitHub apps that need VPC access to MySQL/PostgreSQL/Redis. Also use when diagnosing CloudRun container deploy failures (deploy_failed, readiness/probe failed, image won't start, docker.io pull loops). For stateless HTTP services, prefer HTTP cloud functions.\n文档名：data-model-creation 文档介绍：\"[Deprecated] Optional advanced tool for complex data modeling. For simple MySQL table creation, use relational-database-tool directly; for PostgreSQL / CloudBase PG schema work, use postgresql-development. New environments should use PostgreSQL DDL via queryPgDatabase/managePgDatabase — see postgresql-development skill instead.\"\n文档名：http-api-cloudbase 文档介绍：CloudBase official HTTP API client guide. This skill should be used when backends, scripts, or non-SDK clients must call CloudBase platform APIs over raw HTTP instead of using a platform SDK or MCP management tool.\n文档名：minimal-web-baas-demo 文档介绍：\"Fast path for a minimal CloudBase Web + database demo (最小前后端 / 最小可用 fullstack / Lovable-like BaaS). Defaults to @cloudbase/js-sdk client CRUD (NoSQL app.database / PG app.rdb), MCP-only schema, preview-first, and forbids cloud functions unless secrets, cron/background jobs, or logic that security rules/RLS cannot express. Use for 搭一套 demo、留言板、Todo、Notes、Kanban, or when users say 带云函数+云数据库 but only need CRUD. NOT for production multi-service backends, CloudRun, WeChat Mini Programs, or tasks that truly need server secrets.\"\n文档名：miniprogram-development 文档介绍：WeChat Mini Program development skill for building, debugging, previewing, testing, publishing, and optimizing mini program projects (小程序开发、调试、预览、发布). Covers project structure and config (`project.config.json`, `appid`, `miniprogramRoot`, `tabBar`, routing/navigation, icon assets), WeChat Developer Tools Nightly workflows (`wechatide` CLI, WeChat IDE Skills/MCP), `miniprogram-ci` preview/upload, console/network debugging, message push (消息推送) and customer-service auto-reply (客服消息), mini program SEO / search indexing (小程序搜索优化、页面收录、搜索推广、mpcrawler), and CloudBase integration (`wx.cloud`, 腾讯云开发, 云开发) when explicitly used. Use when users create, develop, modify, debug, preview, deploy, publish, or promote WeChat Mini Programs. NOT for Web frontend (use web-development), pure backend services (use cloudrun-development / cloud-functions), or UI-design-only tasks (use ui-design).\n文档名：ops-inspector 文档介绍：AIOps-style CloudBase inspection skill (v3). Use when users need health checks, log diagnosis, alarm interpretation (CPU alert normal?, peak QPS), metrics via queryEnv(action=metrics), or fault playbooks for 429 / function 404 / ACCESS_TOKEN_INVALID / zero invocations. Triggers on 巡检, 诊断, 告警, 峰值 QPS, 限频, 调用量为 0, troubleshooting.\n文档名：postgresql-development-cloudbase 文档介绍：\"Use when building, debugging, or evaluating CloudBase PostgreSQL / CloudBase PG / PG mode apps, including Postgres schema setup, queryPgDatabase/managePgDatabase, JS SDK v3 app.rdb() CRUD/RPC, PG HTTP API fallback, RLS-style permissions, username-password auth, and Web CMS/admin CRUD flows backed by CloudBase PG.\"\n文档名：relational-database-mcp-cloudbase 文档介绍：\"[Deprecated] This is the required documentation for agents operating on the CloudBase Relational Database through MCP. It defines the canonical SQL management flow with `queryMysqlDatabase`, `manageMysqlDatabase`, `queryPermissions`, and `managePermissions`, including MySQL provisioning, destroy flow, async status checks, safe query execution, schema initialization, and permission updates. New environments should use PostgreSQL — see postgresql-development skill instead.\"\n文档名：relational-database-web-cloudbase 文档介绍：\"[Deprecated] Use when building frontend Web apps that talk to CloudBase Relational Database via @cloudbase/js-sdk – provides the canonical init pattern so you can then use Supabase-style queries from the browser. New environments should use PostgreSQL with app.rdb() — see postgresql-development skill instead.\"\n文档名：spec-workflow 文档介绍：Use when medium-to-large changes need explicit requirements, technical design, and task planning before implementation, especially for multi-module work, unclear acceptance criteria, or architecture-heavy requests.\n文档名：ui-design 文档介绍：Use when users need visual direction, interface hierarchy, layout decisions, design specifications, or prototypes before implementing a Web or mini program UI.\n文档名：web-development 文档介绍：Use when users need to implement, integrate, debug, build, deploy, or validate a Web frontend after the product direction is already clear, especially for React, Vue, Vite, browser flows, or CloudBase Web integration.\n\n      OpenAPI 文档 (openapi) 查询只需要传 mode=\"openapi\" 和 apiName，不要传 action；action 仅用于 mode=\"docs\"。当前支持 7 个 API 文档，分别是：\n      API名：mysqldb API介绍：关系型数据库 RESTful API (MySQL/PostgreSQL) - 云开发关系型数据库 HTTP API\nAPI名：functions API介绍：Cloud Functions API - 云函数 HTTP API\nAPI名：auth API介绍：Authentication API - 身份认证 HTTP API\nAPI名：cloudrun API介绍：CloudRun API - 云托管服务 HTTP API\nAPI名：storage API介绍：Storage API - 云存储 HTTP API\nAPI名：nosql API介绍：NoSQL RESTful API - 文档型数据库 HTTP API\nAPI名：ai_model API介绍：AI 大模型接入 API - 统一 AI 模型 HTTP API",
+      "description": "云开发知识库检索工具，支持 CloudBase 官方文档 (docs)、固定技能文档 (skill) 和 OpenAPI 文档 (openapi) 查询。\n\n      按场景选择 mode：\n      - 工具调用报错且错误信息含具体错误码（如 OperationDenied.FreePackageDenied）时：mode=docs + action=searchDocs（query=错误码），先查错误码官方含义与处理指引再行动，不要凭猜测重试\n      - 不确定答案在哪、需要对官方文档做全文检索时：mode=docs + action=searchDocs（传 query 关键词）\n      - 已知文档标题、层级路径或 URL 时：mode=docs + action=findByName（传 input）或 action=readDoc（传 docPath）\n      - 需要某个场景的落地指南 / 最佳实践时：mode=skill + skillName\n      - 需要 HTTP API 的接口定义时：mode=openapi + apiName\n\n      ⚠️ 重要：当 CloudBase skills 处于禁用状态或当前 IDE 不支持 skill 文件读取时，必须使用 searchKnowledgeBase(mode=skill, skillName=...) 来获取 CloudBase 技能文档内容，而不是尝试直接读取 skill 文件。直接读取可能返回 400 错误。示例：\n      - 需要最小 Web+数据库 Demo 路径时：searchKnowledgeBase(mode=skill, skillName=minimal-web-baas-demo)\n      - 需要 auth-tool 指南时：searchKnowledgeBase(mode=skill, skillName=auth-tool)\n      - 需要 auth-web 指南时：searchKnowledgeBase(mode=skill, skillName=auth-web)\n      - 需要 cloudbase-agent 指南时：searchKnowledgeBase(mode=skill, skillName=cloudbase-agent)\n\n      返回内容包含该 skill 的 SKILL.md 全文，以及它在远端聚合仓（CNB raw）中的全部 .md 文件地址清单（SKILL.md 与 references/ 等，可直接 HTTP 抓取）。正文中代码栅栏之外的相对链接也会改写为绝对地址；若该 skill 在远端仓中不存在，则只返回内联内容并明确标注，不返回失效链接。\n\n      不确定该选哪个时：mode=skill 下不传 skillName、mode=openapi 下不传 apiName 直接调用，会返回当前可用清单及各自的适用场景 / 接口简介，再带上名称重新调用即可。可选名称也见本工具的 skillName / apiName 枚举（skill 共 30 个，API 共 8 个）。\n\n      注意：OpenAPI 文档 (openapi) 查询只需要传 mode=\"openapi\" 和 apiName，不要传 action；action 仅用于 mode=\"docs\"。",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -2274,7 +2311,6 @@
           "skillName": {
             "type": "string",
             "enum": [
-              "skills",
               "ai-model-nodejs",
               "ai-model-web",
               "ai-model-wechat",
@@ -2282,11 +2318,13 @@
               "auth-tool-cloudbase",
               "auth-web-cloudbase",
               "auth-wechat-miniprogram",
+              "cloud-api-operations",
               "cloud-functions",
               "cloud-storage-web",
               "cloudbase-agent",
               "cloudbase-cli",
               "cloudbase-code-review",
+              "cloudbase-declarative-deploy",
               "cloudbase-document-database-in-wechat-miniprogram",
               "cloudbase-document-database-web-sdk",
               "cloudbase-platform",
@@ -2310,6 +2348,7 @@
             "type": "string",
             "enum": [
               "mysqldb",
+              "pgdb",
               "functions",
               "auth",
               "cloudrun",
@@ -2855,6 +2894,152 @@
       }
     },
     {
+      "name": "deployBuild",
+      "description": "解析 cloudbaserc 并对 hosting[] 中配置了 buildCommand 的项目执行本地构建（仅执行 buildCommand，不安装依赖、不上传）。对应 CLI 的 tcb app build，但只处理 hosting[] 静态托管项，与 cloudbaserc 的 app 资源类型（云端构建管线）无关。声明式 hosting 部署拆分为「build → plan → apply」三步，本工具是第一步：先本地构建产物，再 deployPlan 预演，最后 deployApply 上传产物。deployApply 不再隐式本地构建 —— 带构建命令的 hosting 项在产物缺失时会报错引导先执行本工具。纯静态托管（未配置 buildCommand 且无法探测框架）自动跳过。构建为纯本地操作：不解析环境、不要求登录，也不需要 confirm。\n- cwd：项目根目录，默认当前工作目录\n- mode：环境名，命中 envOverrides.<mode> 时合并对应的多环境覆盖配置",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "cwd": {
+            "type": "string",
+            "description": "项目根目录，从此目录向下搜索 cloudbaserc；默认当前工作目录"
+          },
+          "mode": {
+            "type": "string",
+            "description": "环境名（如 production/staging），命中 envOverrides.<mode> 时合并覆盖"
+          }
+        },
+        "additionalProperties": false,
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      }
+    },
+    {
+      "name": "deployPlan",
+      "description": "解析 cloudbaserc 并计算声明式部署计划（dry-run，不产生任何变更）。这是 deployApply 的预演对仗工具：plan 计算、deployApply 执行同一份 cloudbaserc。返回每个资源的动作分类：create=新建，update=覆盖更新，skip=无变更/不会执行，conflict=检测到冲突需中断，deploy=直传覆盖。计划已按 yes 复算为「实际会发生的动作」：不传 yes=true 时，云端已存在的函数会标为 skip（并在 declaredStatus 保留 update），与 deployApply 的实际执行结果一致，避免预演与执行相反。\n适用边界：本工具用于项目级声明式编排（一份 cloudbaserc 统一 plan/apply）；单资源临时直传请用 manageFunctions/manageHosting/manageApps。\n- cwd：项目根目录，默认当前工作目录\n- mode：环境名，命中 envOverrides.<mode> 时合并对应的多环境覆盖配置\n- envId：目标环境 ID，优先级高于 cloudbaserc 中的 envId；不传则用配置值或当前绑定环境\n- only：仅计算指定资源类型的计划\n- skip：跳过指定资源类型\n- yes：与 deployApply 的 yes 对齐，用于复算已存在函数的有效动作。true=预演为覆盖更新(update)；false（默认）=预演为保守跳过(skip)",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "cwd": {
+            "type": "string",
+            "description": "项目根目录，从此目录向下搜索 cloudbaserc；默认当前工作目录"
+          },
+          "mode": {
+            "type": "string",
+            "description": "环境名（如 production/staging），命中 envOverrides.<mode> 时合并覆盖"
+          },
+          "envId": {
+            "type": "string",
+            "description": "目标环境 ID，优先级高于 cloudbaserc 中的 envId；不传则用配置值或当前绑定环境"
+          },
+          "only": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": [
+                "database",
+                "functions",
+                "app",
+                "hosting",
+                "gateway"
+              ]
+            },
+            "description": "仅计算指定资源类型的计划，可选值：database/functions/app/hosting/gateway"
+          },
+          "skip": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": [
+                "database",
+                "functions",
+                "app",
+                "hosting",
+                "gateway"
+              ]
+            },
+            "description": "跳过指定资源类型，可选值：database/functions/app/hosting/gateway"
+          },
+          "yes": {
+            "type": "boolean",
+            "description": "与 deployApply 的 yes 对齐，用于复算已存在函数的有效动作。true=预演为覆盖更新；false（默认）=预演为保守跳过"
+          }
+        },
+        "additionalProperties": false,
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      }
+    },
+    {
+      "name": "deployApply",
+      "description": "解析 cloudbaserc 并按 database→functions→app→hosting→gateway 顺序执行声明式部署。这是 deployPlan 的执行对仗工具（plan 预演 / deployApply 执行同一份 cloudbaserc），属于本地形态的 apply（读本地 cloudbaserc 并在本地构建上传），是会变更云端资源的写操作，必须显式传 confirm=true 才会执行。建议先用 deployPlan 预演，确认计划无误后再执行。\n适用边界：本工具用于项目级声明式编排（一份 cloudbaserc 统一 plan/apply）；单资源临时直传请用 manageFunctions/manageHosting/manageApps。\n- confirm：必须显式传 true 才执行部署，否则直接拒绝\n- confirmDestructive：当本次待执行的数据库迁移含破坏性语句（DROP/TRUNCATE/DELETE、ALTER…DROP/RENAME）时，除 confirm 外还必须显式传 confirmDestructive=true 才会执行；否则拒绝并列出命中的迁移与语句。无破坏性迁移时该参数不生效\n- cwd：项目根目录，默认当前工作目录\n- mode：环境名，命中 envOverrides.<mode> 时合并对应的多环境覆盖配置\n- envId：目标环境 ID，优先级高于 cloudbaserc 中的 envId；不传则用配置值或当前绑定环境\n- only：仅部署指定资源类型\n- skip：跳过指定资源类型\n- yes：遇到已存在资源时的处理方式。true=直接覆盖更新；false（默认）=保守跳过，在无法交互确认的场景下已存在资源不会被覆盖（与 deployPlan 的 yes 语义一致）\n- concurrency：同类型资源最大并行数，默认 1（串行）\n- continueOnError：某个资源失败后继续部署其余资源（database 失败仍强制中断）",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "confirm": {
+            "type": "boolean",
+            "description": "危险操作确认开关。部署会变更云端资源，必须显式传 confirm=true 才会执行"
+          },
+          "confirmDestructive": {
+            "type": "boolean",
+            "description": "破坏性数据库变更确认开关。当待执行迁移含 DROP/TRUNCATE/DELETE 或 ALTER…DROP/RENAME 时，必须在 confirm=true 之外额外显式传 confirmDestructive=true；无破坏性迁移时不生效"
+          },
+          "cwd": {
+            "type": "string",
+            "description": "项目根目录，从此目录向下搜索 cloudbaserc；默认当前工作目录"
+          },
+          "mode": {
+            "type": "string",
+            "description": "环境名（如 production/staging），命中 envOverrides.<mode> 时合并覆盖"
+          },
+          "envId": {
+            "type": "string",
+            "description": "目标环境 ID，优先级高于 cloudbaserc 中的 envId；不传则用配置值或当前绑定环境"
+          },
+          "only": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": [
+                "database",
+                "functions",
+                "app",
+                "hosting",
+                "gateway"
+              ]
+            },
+            "description": "仅部署指定资源类型，可选值：database/functions/app/hosting/gateway"
+          },
+          "skip": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": [
+                "database",
+                "functions",
+                "app",
+                "hosting",
+                "gateway"
+              ]
+            },
+            "description": "跳过指定资源类型，可选值：database/functions/app/hosting/gateway"
+          },
+          "yes": {
+            "type": "boolean",
+            "description": "遇到已存在资源时是否直接覆盖更新。true=覆盖；false（默认）=保守跳过已存在资源"
+          },
+          "concurrency": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "同类型资源最大并行数，默认 1（串行）；仅作用于同类型资源，跨类型依赖顺序不变"
+          },
+          "continueOnError": {
+            "type": "boolean",
+            "description": "某个资源失败后是否继续部署其余资源；database 失败始终强制中断"
+          }
+        },
+        "additionalProperties": false,
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      }
+    },
+    {
       "name": "queryGateway",
       "description": "CloudBase HTTP 网关统一只读入口（Domain/Route）。查询域名下路径路由及其上游：WEB_SCF/SCF=云函数，CBR=云托管，STATIC_STORE=静态托管，LH=轻量应用服务器。主键为 Domain + Path；listRoutes / getRoute / listCustomDomains / getPrivilege。getPrivilege 查询 HTTP 网关总开关（enableService）与访问鉴权（enableAuth）状态。实现自定义域名访问前，先 listCustomDomains：若已有自定义域名，优先 createRoute 挂路由（无需证书 ID）；仅在没有可用自定义域名时才 bindCustomDomain。",
       "inputSchema": {
@@ -2896,7 +3081,7 @@
     },
     {
       "name": "manageGateway",
-      "description": "CloudBase HTTP 网关统一写入口（Domain/Route）。createRoute/updateRoute/deleteRoute 把域名下的 path 转到上游；enableRoute/disableRoute 启用或禁用已有路由（底层 ModifyHTTPServiceRoute 的 Routes[].Enable，不是 ModifyGatewayRoute）。未传 domain 时用 DomainType=HTTPSERVICE 的 IsDefault 默认 HTTP 域名（形如 *.{region}.app.tcloudbase.com），不会使用静态托管 CDN 域名（*.tcloudbaseapp.com，DomainType=STATIC_STORE）。这是网关默认域上的路径路由，不是 STATIC_STORE 上游绑定；STATIC_STORE 上游必须显式传 upstreamResourceType=STATIC_STORE。关闭静态托管默认域名（*.tcloudbaseapp.com）：先 queryGateway(listRoutes) 找到 DomainType=STATIC_STORE 且 IsDefault=true 的 domain，再 manageGateway(action=\"disableRoute\", domain=该域名, path=\"/\")；勿用 manageHosting。创建后可用 queryGateway(action=\"listRoutes\") 核对 Domain / DomainType / Path / UpstreamResourceType。上游类型只用一个参数 upstreamResourceType（也可写在 route.upstreamResourceType，route 优先）：WEB_SCF=HTTP云函数，SCF=Event云函数，CBR=云托管，STATIC_STORE=静态托管，LH=轻量应用服务器；配合 targetName 或 route.serviceName（云函数名/云托管服务名/静态托管实例名，常见 staticstore）。createRoute 只建网关入口，不改上游权限。enablePathTransmission：默认 false 剥触发路径前缀；true 透传完整路径（CBR 多路由、WEB_SCF 自管子路径常需 true；STATIC_STORE 自定义触发路径映射站点根通常 false）。⚠️ 自定义域名访问：若环境已有自定义域名（先 queryGateway listCustomDomains），优先 createRoute 并显式传入该 domain，无需 certificateId；仅首次绑定全新自定义域名时用 bindCustomDomain（certificateId 可选：未传时按域名自动检索证书，单证书自动选用、多证书返回选择指引）。createRoute / bindCustomDomain 创建前会调用 VerifyHTTPServiceRoute 做归属权等预检（探测→创建）；失败时返回 data.checks 与 DNS TXT 指引，配置后重试。CORS/安全域名用 envDomainManagement。enableService/authSwitch：HTTP 网关总开关与访问鉴权开关；createRoute 后若访问报 HTTPSERVICE_NONACTIVATED，通常是总开关未开启（用 queryGateway getPrivilege 查询、enableService 开启）。",
+      "description": "CloudBase HTTP 网关统一写入口（Domain/Route）。createRoute/updateRoute/deleteRoute 把域名下的 path 转到上游；enableRoute/disableRoute 启用或禁用已有路由（底层 ModifyHTTPServiceRoute 的 Routes[].Enable，不是 ModifyGatewayRoute）。未传 domain 时用 DomainType=HTTPSERVICE 的 IsDefault 默认 HTTP 域名（形如 *.{region}.app.tcloudbase.com），不会使用静态托管 CDN 域名（*.tcloudbaseapp.com，DomainType=STATIC_STORE）。这是网关默认域上的路径路由，不是 STATIC_STORE 上游绑定；STATIC_STORE 上游必须显式传 upstreamResourceType=STATIC_STORE。关闭静态托管默认域名（*.tcloudbaseapp.com）：先 queryGateway(listRoutes) 找到 DomainType=STATIC_STORE 且 IsDefault=true 的 domain，再 manageGateway(action=\"disableRoute\", domain=该域名, path=\"/\")；勿用 manageHosting。创建后可用 queryGateway(action=\"listRoutes\") 核对 Domain / DomainType / Path / UpstreamResourceType。上游类型只用一个参数 upstreamResourceType（也可写在 route.upstreamResourceType，route 优先）：WEB_SCF=HTTP云函数，SCF=Event云函数，CBR=云托管，STATIC_STORE=静态托管，LH=轻量应用服务器；配合 targetName 或 route.serviceName（云函数名/云托管服务名/静态托管实例名，常见 staticstore）。createRoute 只建网关入口，不改上游权限。enablePathTransmission：默认 false 剥触发路径前缀；true 透传完整路径（CBR 多路由、WEB_SCF 自管子路径常需 true；STATIC_STORE 自定义触发路径映射站点根通常 false）。⚠️ 自定义域名访问：若环境已有自定义域名（先 queryGateway listCustomDomains），优先 createRoute 并显式传入该 domain，无需 certificateId；仅首次绑定全新自定义域名时用 bindCustomDomain（certificateId 可选：未传时按域名自动检索证书，单证书自动选用、多证书返回选择指引）。createRoute / bindCustomDomain 创建前会调用 VerifyHTTPServiceRoute 做归属权等预检（探测→创建）；失败时返回 data.checks 与 DNS TXT 指引，配置后重试。CORS/安全域名（浏览器跨域白名单，与本工具的网关自定义域名无关）用 manageEnv(action=addSecurityDomain/removeSecurityDomain)。enableService/authSwitch：HTTP 网关总开关与访问鉴权开关；createRoute 后若访问报 HTTPSERVICE_NONACTIVATED，通常是总开关未开启（用 queryGateway getPrivilege 查询、enableService 开启）。",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -3200,8 +3385,11 @@
             "description": "版本名称。getAppVersion 时可与 buildId 二选一；已知版本号时优先传该值。"
           },
           "buildId": {
-            "type": "string",
-            "description": "构建 ID。getAppVersion 时可与 versionName 二选一；部署返回 BuildId 后可直接用它轮询状态。getBuildLog 时必填。"
+            "type": [
+              "string",
+              "number"
+            ],
+            "description": "构建 ID（数字或数字字符串均可）。getAppVersion 时可与 versionName 二选一；部署返回 BuildId 后可直接用它轮询状态。getBuildLog 时必填。"
           },
           "start": {
             "type": "number",
@@ -3239,9 +3427,11 @@
             "description": "要上传并部署的本地项目根目录绝对路径。本地模式下 deployApp 时必填；通常传源码所在目录（含 package.json 和源码），不是 dist 目录。构建产物目录请用 buildPath 指定。cloud mode 下无需传此参数，改用 cosTimestamp。"
           },
           "cosTimestamp": {
-            "type": "integer",
-            "exclusiveMinimum": 0,
-            "description": "COS 时间戳（正整数 number，来自 getUploadUrl 返回的 unixTimestamp）。传入此值则直接使用已上传的代码创建应用，跳过本地文件上传。需先调用 getUploadUrl 获取预签名 URL，上传 ZIP 包后再传此时间戳。cloud mode 下为必填；本地模式也可传此值代替 filePath。两个路径严格二选一：filePath（本地打包上传）或 cosTimestamp（预签名 URL 上传），同时提供或都不提供都会报错。"
+            "type": [
+              "string",
+              "number"
+            ],
+            "description": "COS 时间戳（getUploadUrl 返回的 unixTimestamp，字符串或数字均可）。传入则直接用已上传的代码创建应用，跳过本地打包上传；需先 getUploadUrl 拿预签名 URL 并 PUT ZIP。cloud mode 必填。与 filePath 严格二选一，同时提供或都不提供都会报错。"
           },
           "appPath": {
             "type": "string",
@@ -3302,7 +3492,7 @@
     },
     {
       "name": "queryPermissions",
-      "description": "查询 CloudBase 权限与用户配置，支持查询资源权限（数据库/云函数/存储桶等）、角色列表/详情、应用用户列表/详情，以及网关 OPA 授权策略（对齐 CLI `tcb policy list/get`）。\n\n示例：\n- 查询存储桶权限：`action=\"getResourcePermission\", resourceType=\"storage\", resourceId=\"bucket-name\"`\n- 列出旧网关策略：`action=\"listPolicy\"`（PG / OPA 引擎环境返回空列表，与 CLI 一致）\n- 读取用户 Rego：`action=\"getPolicy\"`；平台扩展策略：`action=\"getPolicy\", extension=true`\n\n📌 跨后端边界提示：调用前先用 `envQuery(action=\"info\", envId=...)` 看 `EnvInfo.RuntimeBackends`。`resourceType=\"noSqlDatabase\"` 查询的是 CloudBase NoSQL 集合规则，与 CloudBase PostgreSQL（PG）表的行级安全（RLS）是两套独立机制——同一个 PG 环境里 NoSQL 集合若仍在使用，对那些集合查询本工具结果**仍然有效**。要查 PG 表 RLS，请改用 `queryPgDatabase(action=\"sql\", sql=\"SELECT * FROM pg_policies WHERE tablename=...\")`。本工具不涉及 MySQL 权限。\n\n⚠️ PostgreSQL 环境：平台 `DescribeResourcePermission` 对 PG 环境会直接拒绝。当 `resourceType=\"function\"` 时，本工具会自动回退到 Manager SDK `describeEnvAuthzConfig`（与 CLI `tcb policy get` 一致，读取 `authz.user.rego`）。显式 OPA 策略请用 `listPolicy` / `getPolicy`。",
+      "description": "查询 CloudBase 权限与用户配置，支持查询资源权限（数据库/云函数/存储桶等）、角色列表/详情、应用用户列表/详情，以及网关 OPA 授权策略（对齐 CLI `tcb policy list/get`）。\n\n示例：\n- 查询存储桶权限：`action=\"getResourcePermission\", resourceType=\"storage\", resourceId=\"bucket-name\"`\n- 列出旧网关策略：`action=\"listPolicy\"`（PG / OPA 引擎环境返回空列表，与 CLI 一致）\n- 读取用户 Rego：`action=\"getPolicy\"`；平台扩展策略：`action=\"getPolicy\", extension=true`\n\n📌 跨后端边界提示：调用前先用 `envQuery(action=\"info\", envId=...)` 看 `EnvInfo.RuntimeBackends`。`resourceType=\"noSqlDatabase\"` 查询的是 CloudBase NoSQL 集合规则，与 CloudBase PostgreSQL（PG）表的行级安全（RLS）是两套独立机制——同一个 PG 环境里 NoSQL 集合若仍在使用，对那些集合查询本工具结果**仍然有效**。要查 PG 表 RLS，请改用 `queryPgDatabase(action=\"sql\", sql=\"SELECT * FROM pg_policies WHERE tablename=...\")`。本工具不涉及 MySQL 权限。\n\n⚠️ PostgreSQL 环境：平台 `DescribeResourcePermission` 对 PG 环境会直接拒绝。当 `resourceType=\"function\"` 时，本工具会自动回退到 Manager SDK `describeEnvAuthzConfig`（与 CLI `tcb policy get` 一致，读取 `authz.user.rego`）。显式 OPA 策略请用 `listPolicy` / `getPolicy`。\n\n⚠️ 角色类 action（`listRoles` / `getRole`）在 **PostgreSQL 类型环境**下平台侧一律拒绝（`The current API does not support PostgreSQL type environments.`）——这是平台能力边界，不是配置问题，**不要在 PG 环境反复重试**；PG 环境请改用 RLS（`managePgDatabase(action=\"execute\")` 跑 `CREATE POLICY`）或控制台管理权限。",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -3379,7 +3569,7 @@
     },
     {
       "name": "managePermissions",
-      "description": "管理 CloudBase 权限与用户配置，支持修改资源权限（数据库/云函数/存储桶等）、角色管理、成员与策略增删、应用用户 CRUD，以及设置网关 OPA Rego 策略（对齐 CLI `tcb policy set`）。\n\n示例：\n- 设置存储桶为私有：`action=\"updateResourcePermission\", resourceType=\"storage\", resourceId=\"bucket-name\", permission=\"PRIVATE\"`\n- 创建角色：`action=\"createRole\", roleName=\"admin\", roleIdentity=\"admin\"`\n- 放开云函数匿名/未登录访问（PG 会走 OPA，对齐 CLI `tcb policy set`）：`action=\"updateResourcePermission\", resourceType=\"function\", resourceId=\"myFn\", permission=\"CUSTOM\", securityRule='{\"invoke\":true}'`\n- 直接设置用户 Rego：`action=\"setPolicy\", regoContent=\"package authz.user\\n\\ndefault allow := false\\n\", confirm=true`（⚠️ 立即禁用旧网关鉴权）\n\n注意：`createUser` / `updateUser` 是环境侧应用用户管理能力，适合测试账号、管理员或预置用户，不应替代浏览器里的 Web SDK 注册表单；前端用户名密码注册应使用 `auth.signUp({ username, password })`，登录应使用 `auth.signInWithPassword({ username, password })`。直接在浏览器里用 `auth.signUp` 创建用户名密码用户取决于 SDK/provider 支持，使用前必须验证；不支持时应走后端或管理端边界，不能在浏览器暴露密钥。`securityRule` 的详细语义取决于 `resourceType`：`doc._openid`、`auth.openid`、查询条件子集校验，以及 `create` / `update` / `delete` JSON 模板仅适用于 `resourceType=\"noSqlDatabase\"` 的文档数据库安全规则；配置 `function` 或 `storage` 时，请参考各自官方安全规则文档，而不是复用 NoSQL 模板。\n\n📌 跨后端边界提示：调用前先用 `envQuery(action=\"info\", envId=...)` 看 `EnvInfo.RuntimeBackends`：\n- `resourceType=\"noSqlDatabase\"` 仅作用于 CloudBase NoSQL 文档数据库的集合；CloudBase PostgreSQL（PG）表的行级权限**不**受它控制——PG 表请改用 RLS：`managePgDatabase(action=\"execute\", confirm=true)` 跑 `ALTER TABLE ... ENABLE ROW LEVEL SECURITY` 与 `CREATE POLICY ...`。同一个 PG 环境里如果还有 NoSQL 集合在用，对那些**集合**继续使用 `noSqlDatabase` 规则是正确的——不是\"PG 环境就禁用本工具\"。\n- `resourceType=\"storage\"` 控制的是 NoSQL/COS 存储桶 ACL；PG 的 `pgstore` bucket 不在此 `resourceType` 覆盖范围内。\n- 本工具不涉及 MySQL；MySQL 数据库权限请走 MySQL 自身的 GRANT/REVOKE 语句（通过 `manageMysqlDatabase`）。\n\n⚠️ PostgreSQL 环境：平台 `ModifyResourcePermission` 对 PG 环境会直接拒绝。当 `resourceType=\"function\"` 时，本工具会自动回退到 Manager SDK `modifyEnvAuthzConfig`（与 CLI `tcb policy set` 一致，写入 `authz.user.rego`）。`securityRule` 可传完整 Rego（`package authz.user`）或 `'{\"invoke\":true}'`（自动生成放通 anonymous/unauthenticated 调 functions 的策略）。设置 Rego 后旧网关鉴权会失效，行为与 CLI 相同。显式 OPA 策略请优先用 `action=\"setPolicy\"`。",
+      "description": "管理 CloudBase 权限与用户配置，支持修改资源权限（数据库/云函数/存储桶等）、角色管理、成员与策略增删、应用用户 CRUD，以及设置网关 OPA Rego 策略（对齐 CLI `tcb policy set`）。\n\n示例：\n- 设置存储桶为私有：`action=\"updateResourcePermission\", resourceType=\"storage\", resourceId=\"bucket-name\", permission=\"PRIVATE\"`\n- 创建角色：`action=\"createRole\", roleName=\"admin\", roleIdentity=\"admin\"`\n- 放开云函数匿名/未登录访问（PG 会走 OPA，对齐 CLI `tcb policy set`）：`action=\"updateResourcePermission\", resourceType=\"function\", resourceId=\"myFn\", permission=\"CUSTOM\", securityRule='{\"invoke\":true}'`\n- 直接设置用户 Rego：`action=\"setPolicy\", regoContent=\"package authz.user\\n\\ndefault allow := false\\n\", confirm=true`（⚠️ 立即禁用旧网关鉴权）\n\n注意：`createUser` / `updateUser` 是环境侧应用用户管理能力，适合测试账号、管理员或预置用户，不应替代浏览器里的 Web SDK 注册表单；前端用户名密码注册应使用 `auth.signUp({ username, password })`，登录应使用 `auth.signInWithPassword({ username, password })`。直接在浏览器里用 `auth.signUp` 创建用户名密码用户取决于 SDK/provider 支持，使用前必须验证；不支持时应走后端或管理端边界，不能在浏览器暴露密钥。`securityRule` 的详细语义取决于 `resourceType`：`doc._openid`、`auth.openid`、查询条件子集校验，以及 `create` / `update` / `delete` JSON 模板仅适用于 `resourceType=\"noSqlDatabase\"` 的文档数据库安全规则；配置 `function` 或 `storage` 时，请参考各自官方安全规则文档，而不是复用 NoSQL 模板。\n\n📌 跨后端边界提示：调用前先用 `envQuery(action=\"info\", envId=...)` 看 `EnvInfo.RuntimeBackends`：\n- `resourceType=\"noSqlDatabase\"` 仅作用于 CloudBase NoSQL 文档数据库的集合；CloudBase PostgreSQL（PG）表的行级权限**不**受它控制——PG 表请改用 RLS：`managePgDatabase(action=\"execute\", confirm=true)` 跑 `ALTER TABLE ... ENABLE ROW LEVEL SECURITY` 与 `CREATE POLICY ...`。同一个 PG 环境里如果还有 NoSQL 集合在用，对那些**集合**继续使用 `noSqlDatabase` 规则是正确的——不是\"PG 环境就禁用本工具\"。\n- `resourceType=\"storage\"` 控制的是 NoSQL/COS 存储桶 ACL；PG 的 `pgstore` bucket 不在此 `resourceType` 覆盖范围内。\n- 本工具不涉及 MySQL；MySQL 数据库权限请走 MySQL 自身的 GRANT/REVOKE 语句（通过 `manageMysqlDatabase`）。\n\n⚠️ PostgreSQL 环境：平台 `ModifyResourcePermission` 对 PG 环境会直接拒绝。当 `resourceType=\"function\"` 时，本工具会自动回退到 Manager SDK `modifyEnvAuthzConfig`（与 CLI `tcb policy set` 一致，写入 `authz.user.rego`）。`securityRule` 可传完整 Rego（`package authz.user`）或 `'{\"invoke\":true}'`（自动生成放通 anonymous/unauthenticated 调 functions 的策略）。设置 Rego 后旧网关鉴权会失效，行为与 CLI 相同。显式 OPA 策略请优先用 `action=\"setPolicy\"`。\n\n⚠️ 角色类 action（`createRole` / `deleteRoles` / `updateRole`）在 **PostgreSQL 类型环境**下平台侧一律拒绝（`The current API does not support PostgreSQL type environments.`）——平台能力边界，不是配置问题，**不要在 PG 环境反复重试**；PG 环境请改用 RLS（`managePgDatabase(action=\"execute\")` 跑 `CREATE POLICY`）或控制台管理权限。",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -3662,7 +3852,7 @@
     },
     {
       "name": "callCloudApi",
-      "description": "通用的云 API 调用工具，主要用于 CloudBase / 腾讯云管控面与依赖资源相关 API 调用。调用前请先确认 service、Action 与 Param，避免猜测 Action 名称。如果你的目标是通过 HTTP 协议直接集成 auth/functions/cloudrun/storage/mysqldb 等 CloudBase 业务 API，请不要优先使用 callCloudApi，而应优先查看对应 OpenAPI / Swagger。现有 OpenAPI / Swagger 能力不是通用的管控面 Action 集合；管控面 API 请优先参考 CloudBase API 概览 https://cloud.tencent.com/document/product/876/34809 与云开发依赖资源接口指引 https://cloud.tencent.com/document/product/876/34808。对于 tcb service，常用 Action 分类如下：\n\n**环境管理**: `CreateEnv`、`ModifyEnv`、`DescribeEnvs`、`DestroyEnv`\n**用户管理**: `CreateUser`、`ModifyUser`、`DescribeUserList`、`DeleteUsers`\n**认证配置**: `EditAuthConfig`、`DescribeAuthDomains`\n**云函数**: `DescribeFunctions`、`CreateFunction`、`UpdateFunctionCode`、`DeleteFunction`\n**数据库**: `CreateMySQLInstance`、`DescribeMySQLInstances`、`DestroyMySQLInstance`\n\n⚠️ 云托管（CloudBase Run）统一走 tcbr service（CreateCloudRunEnv / CreateCloudRunServer / DescribeEnvBaseInfo / DescribeCloudRunEnvs，version=\"2022-02-17\"），tcb 旧小租户接口 CreateCloudBaseRunResource 等已被禁用；部署请用 manageCloudRun。查询单个环境基础信息/是否已开通云托管用 DescribeEnvBaseInfo（EnvId 必填），查询环境列表及资源信息用 DescribeCloudRunEnvs（EnvId 可选过滤）。\n\n⚠️ Region 必须作为本工具顶层参数 `region` 传入（对应 X-TC-Region / 地域 endpoint），不要放进 params。params 里的 Region 会被剥离并当作顶层 region 使用。\n\n销毁环境时，常见做法是至少带上 `EnvId` 和 `BypassCheck: true`，如果环境已经处于隔离期再按文档补 `IsForce: true`。",
+      "description": "通用的云 API 调用工具，主要用于 CloudBase / 腾讯云管控面与依赖资源相关 API 调用。**调用前必读接口索引** https://docs.cloudbase.net/ai/cloudbase-ai-toolkit/api-reference.md （每日自动同步的 Action 级索引，含 rate limit；先查此索引确认 service/Action/参数，避免猜测 Action 名称；索引未覆盖的产品再去该产品官方 API 文档核对）。如果你的目标是通过 HTTP 协议直接集成 auth/functions/cloudrun/storage/mysqldb 等 CloudBase 业务 API，请不要优先使用 callCloudApi，而应优先查看对应 OpenAPI / Swagger。现有 OpenAPI / Swagger 能力不是通用的管控面 Action 集合；管控面 API 请优先参考 CloudBase API 概览 https://cloud.tencent.com/document/product/876/34809 与云开发依赖资源接口指引 https://cloud.tencent.com/document/product/876/34808。对于 tcb service，常用 Action 分类如下：\n\n**环境管理**: `CreateEnv`、`ModifyEnv`、`DescribeEnvs`、`DestroyEnv`\n**用户管理**: `CreateUser`、`ModifyUser`、`DescribeUserList`、`DeleteUsers`\n**认证配置**: `EditAuthConfig`、`DescribeAuthDomains`\n**云函数**: `DescribeFunctions`、`CreateFunction`、`UpdateFunctionCode`、`DeleteFunction`\n**数据库**: `CreateMySQLInstance`、`DescribeMySQLInstances`、`DestroyMySQLInstance`\n\n⚠️ 云托管（CloudBase Run）统一走 tcbr service（CreateCloudRunEnv / CreateCloudRunServer / DescribeEnvBaseInfo / DescribeCloudRunEnvs，version=\"2022-02-17\"），tcb 旧小租户接口 CreateCloudBaseRunResource 等已被禁用；部署请用 manageCloudRun。查询单个环境基础信息/是否已开通云托管用 DescribeEnvBaseInfo（EnvId 必填），查询环境列表及资源信息用 DescribeCloudRunEnvs（EnvId 可选过滤）。\n\n⚠️ Region 必须作为本工具顶层参数 `region` 传入（对应 X-TC-Region / 地域 endpoint），不要放进 params。params 里的 Region 会被剥离并当作顶层 region 使用。\n\n销毁环境时，常见做法是至少带上 `EnvId` 和 `BypassCheck: true`，如果环境已经处于隔离期再按文档补 `IsForce: true`。",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -3674,29 +3864,78 @@
               "scf",
               "sts",
               "cam",
-              "lowcode",
+              "cloudaudit",
+              "tag",
+              "billing",
+              "region",
+              "cvm",
+              "lighthouse",
+              "tke",
+              "cbs",
+              "cfs",
+              "tcr",
+              "cdb",
+              "mariadb",
+              "postgres",
+              "sqlserver",
+              "redis",
+              "mongodb",
+              "cynosdb",
+              "dcdb",
+              "tcaplusdb",
+              "keewidb",
+              "vpc",
+              "clb",
               "cdn",
-              "vpc"
+              "ecdn",
+              "dnspod",
+              "privatedns",
+              "domain",
+              "ssl",
+              "teo",
+              "gaap",
+              "kms",
+              "ssm",
+              "waf",
+              "cwp",
+              "tcss",
+              "ckafka",
+              "tdmq",
+              "tdmysql",
+              "apigateway",
+              "monitor",
+              "cls",
+              "apm",
+              "tsf",
+              "tat",
+              "hunyuan",
+              "lkeap",
+              "tts",
+              "trtc",
+              "live",
+              "vod",
+              "sms",
+              "ses"
             ],
-            "description": "选择要访问的服务。可选：tcb、tcbr、scf、sts、cam、lowcode、cdn、vpc。对于 tcb / scf / lowcode 等 CloudBase 管控面 Action，请优先查官方文档，不要直接猜测 Action。云托管统一走 tcbr（version 需传 2022-02-17）。"
+            "description": "腾讯云产品标识，**取值只能来自本字段的 enum 白名单（共 57 个）**，决定请求域名 https://<service>.tencentcloudapi.com。名单外的取值一律拒绝，不要臆造；COS 不在云 API 体系内。产品名与 Action 对照见 skill cloud-api-operations。云托管统一走 tcbr。"
           },
           "action": {
             "type": "string",
             "minLength": 1,
-            "description": "具体 Action 名称，需符合对应服务的官方 API 定义。若不确定正确 Action，请先查官方文档；不要用近义词或历史命名进行猜测。tcb 常用 Action：环境管理 CreateEnv/ModifyEnv/DescribeEnvs/DestroyEnv、用户管理 CreateUser/ModifyUser/DescribeUserList/DeleteUsers、认证配置 EditAuthConfig、云函数 DescribeFunctions/CreateFunction、数据库 CreateMySQLInstance 等。tcbr 常用 Action：CreateCloudRunEnv（初始化云托管）、DescribeEnvBaseInfo（查询单个环境基础信息，EnvId 必填）、DescribeCloudRunEnvs（查询环境列表/资源信息，EnvId 可选过滤）、CreateCloudRunServer/DescribeCloudRunServers。"
+            "description": "具体 Action 名称，需符合对应服务的官方 API 定义。**不确定时先查官方文档，不要用近义词或历史命名猜测**（猜错会被服务端报成 action invalid，很难排查）。常用 Action 见 skill cloud-api-operations。"
           },
           "version": {
             "type": "string",
-            "description": "API 版本（可选）。缺省时按 service 使用 SDK 内置默认版本；tcbr 必须传 \"2022-02-17\"（否则请求缺少 X-TC-Version 会失败）。示例：service=\"tcbr\", version=\"2022-02-17\", action=\"CreateCloudRunEnv\", params={EnvId:\"env-xxx\",PackageType:\"Standard\"}。"
+            "description": "API 版本（多数场景可省略）。白名单里**只有一个官方版本的产品会自动补齐**，不必传；以下多版本产品必须显式传，缺省会报错并列出可选项：tke、mongodb、teo、monitor、vod、sms。示例：service=\"tcbr\", version=\"2022-02-17\", action=\"CreateCloudRunEnv\", params={EnvId:\"env-xxx\",PackageType:\"Standard\"}；service=\"monitor\" 需显式传 \"2018-07-24\"（告警策略族 Action 属于该版本）。"
           },
           "params": {
             "type": "object",
             "additionalProperties": {},
-            "description": "Action 对应的参数对象，键名需与官方 API 定义一致。某些 Action 需要携带 EnvId 等信息；如不确定参数结构，请先查官方文档。tcb 示例：`{ \"service\": \"tcb\", \"action\": \"DestroyEnv\", \"params\": { \"EnvId\": \"env-xxx\", \"BypassCheck\": true } }`，如果环境已经处于隔离期，可再补 `IsForce: true`；更新环境别名则可用 `{ \"service\": \"tcb\", \"action\": \"ModifyEnv\", \"params\": { \"EnvId\": \"env-xxx\", \"Alias\": \"demo\" } }`。不要把 Region 放进 params（会报 The parameter Region is not recognized）；跨地域请用顶层 region，例如 `{ \"service\": \"tcb\", \"action\": \"DescribeEnvs\", \"region\": \"ap-singapore\" }`。若你的场景是通过 HTTP 协议直接集成 auth/functions/cloudrun/storage/mysqldb 等 CloudBase 业务 API，请优先使用 OpenAPI / Swagger 或 searchKnowledgeBase(mode=\"openapi\")，而不是优先使用 callCloudApi。"
+            "description": "Action 对应的参数对象，键名与官方 API 定义一致，不确定时先查文档。**不要把 Region 放这里**，跨地域用顶层 region。CloudBase 业务 API 请优先用 searchKnowledgeBase(mode=\"openapi\")，不要用本工具。示例见 skill cloud-api-operations。"
           },
           "region": {
             "type": "string",
-            "description": "云 API 地域（X-TC-Region）。例如 ap-shanghai、ap-guangzhou、ap-singapore。DescribeEnvs 等接口按地域查询，跨地域必须传此顶层参数，不要写入 params.Region。"
+            "description": "云 API 地域（X-TC-Region），如 ap-shanghai。跨地域必须传此顶层参数，不要写进 params。⚠️ ap-singapore 同属国内站与国际站，未指定站点按国际站（site=intl）处理：要操作国内站该地域环境，先 auth(action=\"start_auth\", site=\"domestic\") 或设 TCB_SITE=domestic。"
           }
         },
         "required": [

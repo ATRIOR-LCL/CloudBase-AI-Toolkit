@@ -13,6 +13,7 @@ import { registerStorageTools } from "./tools/storage.js";
 import { SetLevelRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import { registerCapiTools } from "./tools/capi.js";
 import { registerCloudRunTools } from "./tools/cloudrun.js";
+import { registerDeployTools } from "./tools/deploy.js";
 import { registerDataModelTools } from "./tools/dataModel.js";
 import { registerGatewayTools } from "./tools/gateway.js";
 import { registerAgentTools } from "./tools/agents.js";
@@ -23,11 +24,13 @@ import { registerPermissionTools } from "./tools/permissions.js";
 import { registerMsgPushTools } from "./tools/msg-push.js";
 import { CloudBaseOptions, Logger, PluginOptions } from "./types.js";
 import type { AuthOptions } from "./auth.js";
+import { isMessageKey, resolveInstanceLang, setInstanceLang, t, type Lang } from "./i18n/index.js";
 import { enableCloudMode } from "./utils/cloud-mode.js";
 import { info } from './utils/logger.js';
 import { resolveSiteAndRegion, SITE_REGION_MAP } from "./utils/site-map.js";
 import { buildJsonToolResult, isToolPayloadError } from "./utils/tool-result.js";
 import { wrapServerWithTelemetry, applyCategoryAnnotationMeta, type ToolAnnotations } from "./utils/tool-wrapper.js";
+import { normalizeClientName } from "./utils/telemetry.js";
 
 // 插件定义
 interface PluginDefinition {
@@ -48,6 +51,7 @@ const DEFAULT_PLUGINS = [
   "setup",
   "rag",
   "cloudrun",
+  "deploy",
   "gateway",
   "app-auth",
   "apps",
@@ -105,6 +109,7 @@ const AVAILABLE_PLUGINS: Record<string, PluginDefinition> = {
   agents: { name: "agents", register: registerAgentTools },
   apps: { name: "apps", register: registerAppTools },
   cloudrun: { name: "cloudrun", register: registerCloudRunTools },
+  deploy: { name: "deploy", register: registerDeployTools },
   capi: { name: "capi", register: registerCapiTools },
   "msg-push": { name: "msg-push", register: registerMsgPushTools },
 };
@@ -194,7 +199,11 @@ export type CloudBaseRegisterToolConfig = {
 export interface ExtendedMcpServer extends McpServer {
   cloudBaseOptions?: CloudBaseOptions;
   authOptions?: AuthOptions;
+  /** 实例输出语言（zh/en）：description 注册选择 + 工具输出文案默认语言 */
+  lang?: Lang;
   ide?: string;
+  /** MCP client 来源标识（hosted 场景由上游解析注入，如 cursor / claude-code） */
+  client?: string;
   logger?: Logger;
   enabledPlugins?: string[];
   pluginOptions?: PluginOptions;
@@ -212,6 +221,14 @@ export interface ExtendedMcpServer extends McpServer {
     config: CloudBaseRegisterToolConfig,
     cb: (...args: any[]) => any,
   ): RegisteredTool;
+}
+
+/**
+ * 把工具 description / title 里写的词典 key 解析成实例语言的实际文案。
+ * 非 key 的字符串（存量动态拼出来的 description）原样返回，保证向后兼容。
+ */
+function resolveToolText(value: string, lang?: Lang): string {
+  return isMessageKey(value) ? t(value, undefined, lang) : value;
 }
 
 /**
@@ -242,10 +259,17 @@ export async function createCloudBaseMcpServer(options?: {
   authOptions?: AuthOptions;
   cloudMode?: boolean;
   ide?: string;
+  client?: string;
   logger?: Logger;
   pluginsEnabled?: string[];
   pluginsDisabled?: string[];
   pluginOptions?: PluginOptions;
+  /**
+   * 实例输出语言（zh/en）。解析链：本参数 > TCB_LANG 环境变量
+   * > `.cloudbase/project.json` 的 lang > 默认 zh。
+   * 影响：工具 description / title 里的词典 key 按本语言解析 + 工具输出文案默认语言。
+   */
+  lang?: Lang | string;
 }): Promise<ExtendedMcpServer> {
   const {
     name = "cloudbase-mcp",
@@ -255,10 +279,12 @@ export async function createCloudBaseMcpServer(options?: {
     authOptions,
     cloudMode = false,
     ide,
+    client,
     logger,
     pluginsEnabled,
     pluginsDisabled,
     pluginOptions,
+    lang,
   } = options ?? {};
 
   // Enable cloud mode if specified
@@ -283,9 +309,23 @@ export async function createCloudBaseMcpServer(options?: {
   // 初始化 toolDefs，用于外部提取工具列表（如微信 IDE）
   server.toolDefs = [];
 
+  // 实例语言解析（须在工具注册前完成：registerTool 包装层按 lang 解析词典 key 形式的 description）
+  server.lang = resolveInstanceLang(lang);
+  // 同步到 i18n 模块级 instanceLang：否则 t() 无 langOverride 时会退化成
+  // TCB_LANG/project.json/zh，导致 options.lang 只影响工具 description、不影响工具输出文案。
+  setInstanceLang(server.lang);
+
   const originalRegisterTool = server.registerTool.bind(server);
   server.registerTool = ((name: string, meta: any, handler: (args: any) => Promise<any>) => {
     const toolMeta = applyCategoryAnnotationMeta(meta ?? {});
+    // 国际化描述支持：description/title 写成词典 key 字符串（如 "storage.queryDescription"）时
+    // 按实例 lang 解析为实际文案；普通字符串（存量动态 description）原样透传，工具侧零改动。
+    if (typeof toolMeta?.description === "string") {
+      toolMeta.description = resolveToolText(toolMeta.description, server.lang);
+    }
+    if (typeof toolMeta?.title === "string") {
+      toolMeta.title = resolveToolText(toolMeta.title, server.lang);
+    }
     // 同步记录到 toolDefs
     server.toolDefs.push({
       name,
@@ -334,6 +374,12 @@ export async function createCloudBaseMcpServer(options?: {
     server.ide = ide;
   }
 
+  // Store client in server instance for telemetry (normalized, invalid values dropped)
+  const normalizedClient = normalizeClientName(client);
+  if (normalizedClient) {
+    server.client = normalizedClient;
+  }
+
   // Store logger in server instance for tools to access
   if (logger) {
     server.logger = logger;
@@ -376,5 +422,6 @@ export { error, info, warn } from "./utils/logger.js";
 export {
   reportToolCall,
   reportToolkitLifecycle,
-  telemetryReporter
+  telemetryReporter,
+  normalizeClientName
 } from "./utils/telemetry.js";
