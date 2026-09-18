@@ -1,6 +1,6 @@
 {
   "name": "miniprogram-clouddev-expert",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "description": "WeChat mini program cloud development expert: builds mini programs on WeChat Cloud Development (CloudBase) using cloud-dev skills as knowledge and WeChat DevTools CLI/MCP as tools, covering cloud functions, cloud database, message push callbacks, and virtual payment integration.",
   "author": {
     "name": "booker",
@@ -31,7 +31,9 @@
     "en": "I have a WeChat mini program with virtual payment enabled — help me integrate the full payment flow on cloud dev."
   },
   "dependencies": {
-    "connectors": ["cloudbase"]
+    "connectors": [
+      "cloudbase"
+    ]
   },
   "plugin": "miniprogram-clouddev-expert",
   "tags": [
