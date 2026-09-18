@@ -2,6 +2,18 @@ import useDocusaurusContext from '@docusaurus/useDocusaurusContext';
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import styles from './IDESelector.module.css';
 import { reportEvent } from './analytics';
+import {
+  buildConfigForMode,
+  buildCursorInstallUrl,
+  buildTraeInstallUrl,
+  buildVSCodeInstallUrl,
+  buildWorkBuddyTaskUrl,
+  SITES,
+  SITE_IDS,
+  type ChannelType,
+  type ConnectionMode,
+  type SiteId,
+} from './connectionMatrix';
 import { getRandomPrompt } from './promptsData';
 
 interface IDE {
@@ -14,7 +26,6 @@ interface IDE {
   iconUrl?: string;
   docUrl?: string;
   oneClickInstallUrl?: string;
-  oneClickInstallImage?: string;
   supportsProjectMCP?: boolean;
   cliCommand?: string;
   cliConfigExample?: string;
@@ -22,6 +33,8 @@ interface IDE {
   installCommand?: string;
   installCommandDocs?: string;
   useCommandInsteadOfConfig?: boolean;
+  /** 该客户端是否出「远端 / 本地」与站点开关。`builtin` 通道不出——那些客户端走自有市场，用户选了也不生效。 */
+  showModeSwitch?: boolean;
 }
 
 const IDES: IDE[] = [
@@ -45,7 +58,6 @@ const IDES: IDE[] = [
     iconUrl: 'https://7463-tcb-advanced-a656fc-1257967285.tcb.qcloud.la/assets/workbuddy-logo.svg',
     docUrl: '/ai/cloudbase-ai-toolkit/ide-setup/workbuddy',
     configExample: '',
-    showInstallButton: false,
     useCommandInsteadOfConfig: true,
     installCommandDocs: '**使用内置连接器**\n\n1. 在 WorkBuddy 对话界面中，点击输入框左下角的 **连接器** 按钮\n2. 在弹窗中找到 **腾讯云 CloudBase**，点击进入详情页，点击 **连接** 启用\n\n启用后，即可在对话中直接使用 CloudBase 的各项能力。\n\n**使用快捷命令**\n\n在对话中直接输入 `/cloudbase` 选择 CloudBase Skill，然后输入需求即可。',
   },
@@ -205,7 +217,7 @@ const IDES: IDE[] = [
     iconUrl: 'https://lf-cdn.trae.ai/obj/trae-ai-sg/trae_website_prod/favicon.png',
     docUrl: 'https://docs.trae.ai/ide/use-mcp-servers-in-agents?_lang=zh',
     supportsProjectMCP: true,
-    oneClickInstallUrl: 'trae://trae.ai-ide/mcp-import?type=stdio&name=cloudbase&config=eyJjb21tYW5kIjoibnB4IiwiYXJncyI6WyJAY2xvdWRiYXNlL2Nsb3VkYmFzZS1tY3BAbGF0ZXN0Il0sImVudiI6eyJJTlRFR1JBVElPTl9JREUiOiJUcmFlIn19',
+    // 一键安装链接不在这里写死：由 buildTraeInstallUrl 按模式与站点生成
     configExample: `{
   "mcpServers": {
     "cloudbase": {
@@ -539,6 +551,60 @@ const IDES: IDE[] = [
   },
 ]
 
+/**
+ * 每个客户端「拿到配置」的路径。这不是分类癖，它决定这一页渲染什么：
+ *
+ * - `deeplink` 有官方安装协议 → 出「Add to X」按钮（本地 / 远端各一条链接）
+ * - `cli`      一条命令搞定 → 出命令 + 配置文件兜底
+ * - `manual`   用户自己写配置 → 出 JSON（本地 / 远端由开关切换）
+ * - `builtin`  客户端已内置 CloudBase，走自有市场或连接器 → **不出开关、不出配置**
+ *
+ * `builtin` 为什么必须区别对待：WorkBuddy / CodeBuddy 的连接器跟着用户本机登录态走，
+ * 页面上给一个「国内站 / 国际站」开关，用户选完以为生效了、实际没有任何作用——
+ * 那是在制造假的期望。
+ */
+const CHANNEL_BY_ID: Record<string, ChannelType> = {
+  // 有官方一键安装协议
+  cursor: 'deeplink',
+  'github-copilot': 'deeplink',
+  trae: 'deeplink',
+
+  // 一条命令安装
+  'claude-code': 'cli',
+  'codebuddy-code': 'cli',
+  'kimi-code': 'cli',
+  'iflow-cli': 'cli',
+  'openai-codex-cli': 'cli',
+
+  // 客户端已内置，走自有市场 / 连接器
+  'wechat-devtools': 'builtin',
+  workbuddy: 'builtin',
+  codebuddy: 'builtin',
+  'kimi-work': 'builtin',
+  zcode: 'builtin',
+  'codex-app': 'builtin',
+  openclaw: 'builtin',
+  'cloudbase-cli': 'builtin',
+
+  // 手写配置
+  opencode: 'manual',
+  qoder: 'manual',
+  windsurf: 'manual',
+  'tongyi-lingma': 'manual',
+  'qwen-code': 'manual',
+  'gemini-cli': 'manual',
+  cline: 'manual',
+  antigravity: 'manual',
+  roocode: 'manual',
+  'augment-code': 'manual',
+  kiro: 'manual',
+  'baidu-comate': 'manual',
+};
+
+function getChannel(ide: IDE): ChannelType {
+  return CHANNEL_BY_ID[ide.id] || 'manual';
+}
+
 // JSON syntax highlighter
 function highlightJSON(json: string): React.ReactNode[] {
   const lines = json.split('\n');
@@ -591,10 +657,13 @@ function highlightJSON(json: string): React.ReactNode[] {
 
 interface IDESelectorProps {
   defaultIDE?: string;
-  showInstallButton?: boolean;
   customPrompt?: string;
   collapsibleInstallSteps?: boolean;
   collapseStep1?: boolean;
+  /** 默认连接方式。不传则远端优先（推荐路径）。 */
+  defaultMode?: ConnectionMode;
+  /** 默认站点。不传则国内站。 */
+  defaultSite?: SiteId;
 }
 
 // i18n translations
@@ -602,7 +671,7 @@ const translations: Record<string, Record<string, string>> = {
   'zh-CN': {
     client: 'Client',
     configureDescription: '配置你的 AI 工具以连接 CloudBase 能力',
-    connectionModesHint: '支持本地与托管两种连接方式，详见 ',
+    connectionModesHint: '支持本地与远端两种连接方式，详见 ',
     connectionModesLink: '连接方式',
     connectionModesSuffix: '。',
     installation: '步骤 1：安装 / 配置 CloudBase',
@@ -610,6 +679,7 @@ const translations: Record<string, Record<string, string>> = {
     templateDescription: '模板已内置 MCP 配置和 AI 规则',
     viewTemplates: '查看模板',
     oneClickInstall: '一键安装',
+    openConnector: '打开连接器',
     orManualConfig: '或手动配置',
     orAddConfig: '将以下配置添加到项目目录下的',
     step2Verify: '步骤 2：和 AI 对话',
@@ -629,11 +699,20 @@ const translations: Record<string, Record<string, string>> = {
     copyPrompt: '复制提示词',
     refreshPrompt: '刷新',
     openInIDE: '用 {name} 打开',
+    connectionMode: '连接方式',
+    modeRemote: '远端（推荐）',
+    modeLocal: '本地',
+    siteLabel: '站点',
+    remoteNote: '远端模式只需填地址，客户端会在浏览器里引导你完成登录授权，密钥不落到配置文件。',
+    localNote: '本地模式在本机运行 npx，功能最全（含上传本地文件、下载模板等）。',
+    builtinNote: '该客户端已内置 CloudBase，接入方式以官方市场 / 连接器为准，站点跟随你的登录态，无需在此选择。',
+    siteNoSqlUnavailable: '国际站暂未提供 NoSQL（文档数据库）工具',
+    siteConsole: '控制台',
   },
   'en': {
     client: 'Client',
     configureDescription: 'Configure your AI tool to connect with CloudBase capabilities',
-    connectionModesHint: 'Supports local and hosted connection. See ',
+    connectionModesHint: 'Supports local and remote connection. See ',
     connectionModesLink: 'connection modes',
     connectionModesSuffix: '.',
     installation: 'Step 1: Install / Configure CloudBase',
@@ -641,6 +720,7 @@ const translations: Record<string, Record<string, string>> = {
     templateDescription: 'Template includes MCP configuration and AI rules',
     viewTemplates: 'View templates',
     oneClickInstall: 'Install in one click',
+    openConnector: 'Open connector',
     orManualConfig: 'Or manual configuration',
     orAddConfig: 'Or add this configuration to',
     step2Verify: 'Step 2: Chat with AI',
@@ -660,15 +740,25 @@ const translations: Record<string, Record<string, string>> = {
     copyPrompt: 'Copy prompt',
     refreshPrompt: 'Refresh',
     openInIDE: 'Open with {name}',
+    connectionMode: 'Connection',
+    modeRemote: 'Remote (recommended)',
+    modeLocal: 'Local',
+    siteLabel: 'Site',
+    remoteNote: 'Remote needs only a URL — your client walks you through browser authorization, so no keys land in config files.',
+    localNote: 'Local runs npx on your machine with the full feature set, including local file upload and template download.',
+    builtinNote: 'This client ships CloudBase built in. Setup follows its own marketplace or connectors, and the site follows your login state — nothing to pick here.',
+    siteNoSqlUnavailable: 'NoSQL (document database) tools are not yet available on the international site',
+    siteConsole: 'Console',
   },
 };
 
 export default function IDESelector({
   defaultIDE,
-  showInstallButton = true,
   customPrompt,
   collapsibleInstallSteps = false,
-  collapseStep1 = false
+  collapseStep1 = false,
+  defaultMode = 'remote',
+  defaultSite = 'domestic'
 }: IDESelectorProps) {
   const { i18n } = useDocusaurusContext();
   // Normalize locale: zh-Hans -> zh-CN, en -> en
@@ -705,6 +795,8 @@ export default function IDESelector({
   };
 
   const [selectedIDE, setSelectedIDE] = useState<string>(defaultIDE || 'cursor');
+  const [mode, setMode] = useState<ConnectionMode>(defaultMode);
+  const [site, setSite] = useState<SiteId>(defaultSite);
   const [isOpen, setIsOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [copiedCode, setCopiedCode] = useState(false);
@@ -760,7 +852,7 @@ export default function IDESelector({
   const getIconUrl = (ide: IDE) => {
     if (ide.iconUrl) return ide.iconUrl;
     if (ide.iconSlug) {
-      const baseUrl = 'https://img.jsdelivr.com/raw.githubusercontent.com/lobehub/lobe-icons/refs/heads/master/packages/static-png/light';
+      const baseUrl = 'https://cdn.jsdelivr.net/npm/@lobehub/icons-static-png@latest/light';
       if (iconsWithColor.has(ide.iconSlug)) {
         return `${baseUrl}/${ide.iconSlug}-color.png`;
       }
@@ -769,48 +861,65 @@ export default function IDESelector({
     return null;
   };
 
-  // Generate Cursor one-click install URL
-  const generateCursorInstallUrl = (ideConfig: IDE): string => {
-    const config = {
-      env: {
-        INTEGRATION_IDE: ideConfig.name
-      },
-      command: 'npx',
-      args: ['@cloudbase/cloudbase-mcp@latest']
-    };
-    const base64Config = btoa(JSON.stringify(config));
-    return `https://cursor.com/en-US/install-mcp?name=cloudbase&config=${encodeURIComponent(base64Config)}`;
-  };
+  // 接入通道决定这一页渲染什么（按钮 / 命令 / JSON / 只指路）
+  const channel = getChannel(ide);
 
-  // Generate VSCode one-click install URL
-  const generateVSCodeInstallUrl = (ideConfig: IDE): string => {
-    const config = {
-      name: 'cloudbase',
-      command: 'npx',
-      args: ['@cloudbase/cloudbase-mcp@latest'],
-      env: {
-        INTEGRATION_IDE: ideConfig.name
-      }
-    };
-    const configJson = JSON.stringify(config);
-    return `vscode:mcp/install?${encodeURIComponent(configJson)}`;
-  };
+  // builtin 通道不出开关：那些客户端的站点跟随用户本机登录态，让用户在这里选
+  // 只会制造「选了就生效」的假期望。
+  const supportsModeSwitch = ide.showModeSwitch ?? (channel !== 'builtin' && !!ide.configExample);
 
-  const getOneClickInstallUrl = (): string | null => {
-    if (ide.id === 'cursor') {
-      return generateCursorInstallUrl(ide);
+  // 一键安装 / 打开连接器：由模式与站点驱动。各家协议集中在 connectionMatrix.ts，
+  // 这里只负责按 ide.id 分派——不再各自维护一套生成逻辑。
+  //
+  // 出不出按钮只取决于「这个客户端有没有官方深链协议」，与页面无关。不要再用 prop
+  // 开关它：历史上有过一个 showInstallButton，从未被消费，各页面却抄着传 `{false}`，
+  // 一旦真接上门禁就会把深链按钮全部关掉。
+  //
+  // `kind` 区分两种语义，文案不能混：`install` 是真的把配置写进去；`task` 只是带着
+  // 连接器开一个任务草稿（WorkBuddy 没有 mcp/install 协议），写成「一键安装」是骗人。
+  const oneClickInstall = useMemo<{ url: string; kind: 'install' | 'task' } | null>(() => {
+    const ctx = { mode, siteId: site, ideName: ide.name };
+    switch (ide.id) {
+      case 'cursor':
+        return { url: buildCursorInstallUrl(ctx), kind: 'install' };
+      case 'github-copilot':
+        return { url: buildVSCodeInstallUrl(ctx), kind: 'install' };
+      case 'trae':
+        return { url: buildTraeInstallUrl(ctx), kind: 'install' };
+      case 'workbuddy':
+        return { url: buildWorkBuddyTaskUrl(), kind: 'task' };
+      default:
+        return ide.oneClickInstallUrl
+          ? { url: ide.oneClickInstallUrl, kind: 'install' }
+          : null;
     }
-    if (ide.id === 'github-copilot') {
-      return generateVSCodeInstallUrl(ide);
-    }
-    return ide.oneClickInstallUrl || null;
-  };
+  }, [ide, mode, site]);
 
-  const oneClickInstallUrl = getOneClickInstallUrl();
+  const oneClickInstallUrl = oneClickInstall?.url ?? null;
+  const oneClickKind = oneClickInstall?.kind ?? 'install';
+
+  // task 型不是安装，按钮内文不能写 Add to
+  const oneClickButtonText =
+    oneClickKind === 'task'
+      ? isEnglish
+        ? `Open in ${ide.name}`
+        : `用 ${ide.name} 打开`
+      : `Add to ${ide.name}`;
+
   const isProtocolInstallUrl = !!oneClickInstallUrl && !/^https?:\/\//i.test(oneClickInstallUrl);
 
+  // 实际展示的配置：本地模式用 IDE 表里手写的那份（它承载了各家独有的容器键，
+  // 如 VS Code 的 servers、Cline 的 autoApprove），远端模式由它派生。
+  //
+  // 没有开关的客户端（builtin 通道）原样展示手写配置——开关是表达「我要哪种模式」
+  // 的唯一入口，没有开关就不该替用户改变配置形态。
+  const configExample = useMemo(() => {
+    if (!supportsModeSwitch) return ide.configExample;
+    return buildConfigForMode(ide.configExample, mode, site);
+  }, [ide, mode, site, supportsModeSwitch]);
+
   const handleCopyCode = async () => {
-    await navigator.clipboard.writeText(ide.configExample);
+    await navigator.clipboard.writeText(configExample);
     setCopiedCode(true);
     setTimeout(() => setCopiedCode(false), 2000);
     reportEvent({
@@ -986,8 +1095,13 @@ export default function IDESelector({
             </svg>
           </button>
 
-          {isOpen && (
-            <div className={styles.dropdown} role="listbox">
+          {/*
+            始终渲染，靠 CSS 隐藏。Docusaurus 走 SSG，条件渲染会让这份 IDE 名单
+            （28 个）不进静态 HTML——Algolia 与搜索引擎都读不到，于是「cloudbase
+            cline 怎么配」这类查询一个客户端名都搜不到。代价是几十个 DOM 节点，
+            换回来的是全部客户端可被检索。
+          */}
+          <div className={styles.dropdown} role="listbox" hidden={!isOpen}>
               <div className={styles.searchWrapper}>
                 <svg className={styles.searchIcon} width="14" height="14" viewBox="0 0 14 14" fill="none">
                   <path d="M6.5 11C9.26142 11 11.5 8.76142 11.5 6C11.5 3.23858 9.26142 1 6.5 1C3.73858 1 1.5 3.23858 1.5 6C1.5 8.76142 3.73858 11 6.5 11Z" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
@@ -1032,9 +1146,83 @@ export default function IDESelector({
                 )}
               </div>
             </div>
-          )}
         </div>
       </div>
+
+      {/* 连接方式与站点开关：只有能写 MCP 配置的客户端才渲染 */}
+      {supportsModeSwitch ? (
+        <>
+          <div className={styles.modeBar}>
+            <div className={styles.modeGroup}>
+              <span className={styles.modeLabel}>{t.connectionMode}</span>
+              <div className={styles.segmented}>
+                <button
+                  type="button"
+                  className={`${styles.segment} ${mode === 'remote' ? styles.segmentActive : ''}`}
+                  aria-pressed={mode === 'remote'}
+                  onClick={() => {
+                    setMode('remote');
+                    reportEvent({
+                      name: 'IDE Selector - Switch Mode',
+                      ideId: ide.id,
+                      eventType: 'mode_remote',
+                    });
+                  }}
+                >
+                  {t.modeRemote}
+                </button>
+                <button
+                  type="button"
+                  className={`${styles.segment} ${mode === 'local' ? styles.segmentActive : ''}`}
+                  aria-pressed={mode === 'local'}
+                  onClick={() => {
+                    setMode('local');
+                    reportEvent({
+                      name: 'IDE Selector - Switch Mode',
+                      ideId: ide.id,
+                      eventType: 'mode_local',
+                    });
+                  }}
+                >
+                  {t.modeLocal}
+                </button>
+              </div>
+            </div>
+
+            <div className={styles.modeGroup}>
+              <span className={styles.modeLabel}>{t.siteLabel}</span>
+              <div className={styles.segmented}>
+                {SITE_IDS.map((siteId) => (
+                  <button
+                    key={siteId}
+                    type="button"
+                    className={`${styles.segment} ${site === siteId ? styles.segmentActive : ''}`}
+                    aria-pressed={site === siteId}
+                    onClick={() => {
+                      setSite(siteId);
+                      reportEvent({
+                        name: 'IDE Selector - Switch Site',
+                        ideId: ide.id,
+                        eventType: `site_${siteId}`,
+                      });
+                    }}
+                  >
+                    {isEnglish ? SITES[siteId].labelEn : SITES[siteId].label}
+                  </button>
+                ))}
+              </div>
+            </div>
+          </div>
+
+          {/* 当前选择直接决定下面这份配置能不能跑通，所以说明必须紧跟开关 */}
+          <p className={styles.modeNote}>
+            {mode === 'remote' ? t.remoteNote : t.localNote}
+            {mode === 'remote' && site === 'intl' ? ` ${t.siteNoSqlUnavailable}。` : ''}
+          </p>
+        </>
+      ) : (
+        <p className={styles.builtinNote}>{t.builtinNote}</p>
+      )}
 
       <p className={styles.description}>
         {t.configureDescription}
@@ -1141,10 +1329,12 @@ export default function IDESelector({
               </div>
             )}
 
-            {/* One-click install button */}
+            {/* One-click install / open-connector button */}
             {oneClickInstallUrl && (
               <div className={styles.oneClickInstall}>
-                <p className={styles.oneClickLabel}>{t.oneClickInstall}:</p>
+                <p className={styles.oneClickLabel}>
+                  {oneClickKind === 'task' ? t.openConnector : t.oneClickInstall}:
+                </p>
                 <a
                   href={oneClickInstallUrl}
                   className={styles.oneClickButton}
@@ -1158,37 +1348,22 @@ export default function IDESelector({
                     });
                   }}
                 >
-                  {ide.oneClickInstallImage ? (
-                    <img
-                      src={ide.oneClickInstallImage}
-                      alt={`Add to ${ide.name}`}
-                      className={styles.oneClickImage}
-                    />
-                  ) : (ide.id === 'cursor' || ide.id === 'github-copilot') ? (
-                    <div className={styles.customOneClickButton}>
-                      {getIconUrl(ide) && (
-                        <img
-                          src={getIconUrl(ide)!}
-                          alt=""
-                          className={`${styles.customButtonIcon} ${ide.id === 'cursor' ? styles.cursorIcon : ''}`}
-                        />
-                      )}
-                      <span className={styles.customButtonText}>Add to {ide.name}</span>
-                    </div>
-                  ) : ide.id === 'trae' ? (
-                    <div className={styles.customOneClickButton}>
-                      {getIconUrl(ide) && (
-                        <img
-                          src={getIconUrl(ide)!}
-                          alt=""
-                          className={styles.customButtonIcon}
-                        />
-                      )}
-                      <span className={styles.customButtonText}>Add to {ide.name}</span>
-                    </div>
-                  ) : (
-                    <span>Add to {ide.name}</span>
-                  )}
+                  {/*
+                    所有客户端共用同一套按钮外观：浅灰底 + 圆角 + 品牌图标 + 「Add to X」。
+                    以前这里按 ide.id 分了四条分支（官方图片 badge / cursor+copilot / trae / 裸文字），
+                    同一个页面上的按钮因此长得各不相同，WorkBuddy 那条更是只剩一行没有按钮外观的纯文字。
+                    图标统一走 getIconUrl(ide)：30 多个客户端都已配好图源，没有图源时自动退化成纯文字按钮。
+                  */}
+                  <div className={styles.customOneClickButton}>
+                    {getIconUrl(ide) && (
+                      <img
+                        src={getIconUrl(ide)!}
+                        alt=""
+                        className={styles.customButtonIcon}
+                      />
+                    )}
+                    <span className={styles.customButtonText}>{oneClickButtonText}</span>
+                  </div>
                 </a>
               </div>
             )}
@@ -1306,7 +1481,7 @@ export default function IDESelector({
                       )}
 
                       {/* Manual configuration */}
-                      {!ide.useCommandInsteadOfConfig && (getOneClickInstallUrl() || ide.cliCommand) && (
+                      {!ide.useCommandInsteadOfConfig && (oneClickInstallUrl || ide.cliCommand) && (
                         <p className={styles.orManualConfig}>{t.orManualConfig}:</p>
                       )}
 
@@ -1344,7 +1519,7 @@ export default function IDESelector({
                               </button>
                             </div>
                             <pre className={styles.codeContent}>
-                              <code>{highlightJSON(ide.configExample)}</code>
+                              <code>{highlightJSON(configExample)}</code>
                             </pre>
                           </div>
                         </>
@@ -1447,7 +1622,7 @@ export default function IDESelector({
                 )}
 
                 {/* Manual configuration */}
-                {!ide.useCommandInsteadOfConfig && (getOneClickInstallUrl() || ide.cliCommand) && (
+                {!ide.useCommandInsteadOfConfig && (oneClickInstallUrl || ide.cliCommand) && (
                   <p className={styles.orManualConfig}>{t.orManualConfig}:</p>
                 )}
 
@@ -1485,7 +1660,7 @@ export default function IDESelector({
                         </button>
                       </div>
                       <pre className={styles.codeContent}>
-                        <code>{highlightJSON(ide.configExample)}</code>
+                        <code>{highlightJSON(configExample)}</code>
                       </pre>
                     </div>
                   </>
